@@ -1,0 +1,342 @@
+package main
+
+import (
+	"database/sql"
+	"encoding/json"
+	"io/fs"
+	"math"
+	"net/http"
+	"net/http/httptest"
+	"path/filepath"
+	"strconv"
+	"strings"
+	"testing"
+	"time"
+
+	"gopkg.in/yaml.v3"
+	_ "modernc.org/sqlite"
+)
+
+func testApp(t *testing.T) *App {
+	t.Helper()
+	db, err := sql.Open("sqlite", filepath.Join(t.TempDir(), "substore.db"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { _ = db.Close() })
+	app := &App{db: db}
+	if err := app.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	return app
+}
+
+func TestFrontendAssetsAreEmbedded(t *testing.T) {
+	webRoot, err := fs.Sub(webAssets, "web")
+	if err != nil {
+		t.Fatal(err)
+	}
+	for _, name := range []string{"index.html", "styles.css", "app.js"} {
+		contents, err := fs.ReadFile(webRoot, name)
+		if err != nil {
+			t.Fatalf("embedded %s: %v", name, err)
+		}
+		if len(contents) == 0 {
+			t.Fatalf("embedded %s is empty", name)
+		}
+	}
+}
+
+func TestDefaultSubscriptionClientIsClashVerge(t *testing.T) {
+	app := testApp(t)
+	if got := app.settings().DefaultUserAgent; got != "clash-verge/v2.4.5" {
+		t.Fatalf("default subscription client = %q, want Clash Verge", got)
+	}
+}
+
+func TestSubscriptionUsageAndExpiryFromHeader(t *testing.T) {
+	usage := parseSubscriptionUserInfo("upload=1073741824; download=2147483648; total=10737418240; expire=1893456000")
+	if !usage.HasUsage || !usage.HasTotal || !usage.HasExpire {
+		t.Fatalf("expected all subscription usage fields to be detected: %+v", usage)
+	}
+	if math.Abs(usage.UsedGB-3) > 0.0001 || math.Abs(usage.TotalGB-10) > 0.0001 {
+		t.Fatalf("unexpected usage: used=%f total=%f", usage.UsedGB, usage.TotalGB)
+	}
+	if usage.ExpireAt != "2030-01-01T00:00:00Z" {
+		t.Fatalf("unexpected expiry: %s", usage.ExpireAt)
+	}
+}
+
+func TestSubscriptionUsageHistoryDeduplicatesURLAndHandlesRenewal(t *testing.T) {
+	app := testApp(t)
+	const rawURL = "https://provider.example/shared-token"
+	if _, err := app.db.Exec(`INSERT INTO subscriptions(name,url,path,user_agent,enabled,created_at) VALUES('First',?,'./proxy-providers/first.yaml','clash-meta',1,'now'),('Duplicate',?,'./proxy-providers/duplicate.yaml','clash-meta',1,'now')`, rawURL, rawURL); err != nil {
+		t.Fatal(err)
+	}
+	start := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
+	record := func(at time.Time, header string) {
+		t.Helper()
+		if err := app.recordSubscriptionUsage(rawURL, at.Format(time.RFC3339), header, time.Hour); err != nil {
+			t.Fatal(err)
+		}
+	}
+	record(start, "upload=0; download=10737418240; total=107374182400; expire=1800000000")
+	record(start.Add(30*time.Minute), "upload=0; download=12884901888; total=107374182400; expire=1800000000")
+	record(start.Add(time.Hour), "upload=0; download=16106127360; total=107374182400; expire=1800000000")
+	record(start.Add(2*time.Hour), "upload=0; download=2147483648; total=214748364800; expire=1900000000")
+
+	var sourceCount, sampleCount, resetCount int
+	var tracked float64
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM subscription_usage_sources`).Scan(&sourceCount); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow(`SELECT COUNT(*),COALESCE(SUM(delta_gb),0),COALESCE(SUM(CASE WHEN event='plan-renewed' THEN 1 ELSE 0 END),0) FROM subscription_usage_samples`).Scan(&sampleCount, &tracked, &resetCount); err != nil {
+		t.Fatal(err)
+	}
+	if sourceCount != 1 || sampleCount != 3 {
+		t.Fatalf("expected one shared source and three hourly samples, got sources=%d samples=%d", sourceCount, sampleCount)
+	}
+	if math.Abs(tracked-7) > 0.0001 || resetCount != 1 {
+		t.Fatalf("expected 5 GB growth plus 2 GB after renewal, got tracked=%f resets=%d", tracked, resetCount)
+	}
+	var firstUsed, duplicateUsed float64
+	if err := app.db.QueryRow(`SELECT used_gb FROM subscriptions WHERE name='First'`).Scan(&firstUsed); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.db.QueryRow(`SELECT used_gb FROM subscriptions WHERE name='Duplicate'`).Scan(&duplicateUsed); err != nil {
+		t.Fatal(err)
+	}
+	if firstUsed != 2 || duplicateUsed != 2 {
+		t.Fatalf("shared URL subscriptions did not receive the same provider counter: %f %f", firstUsed, duplicateUsed)
+	}
+	var duplicateID int64
+	if err := app.db.QueryRow(`SELECT id FROM subscriptions WHERE name='Duplicate'`).Scan(&duplicateID); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/api/subscriptions/"+strconv.FormatInt(duplicateID, 10)+"/usage", nil)
+	recorder := httptest.NewRecorder()
+	app.handleSubscriptionAction(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("usage history returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var history subscriptionUsageResponse
+	if err := json.Unmarshal(recorder.Body.Bytes(), &history); err != nil {
+		t.Fatal(err)
+	}
+	if history.SubscriptionName != "Duplicate" || history.Summary.SampleCount != 3 || math.Abs(history.Summary.TrackedGB-7) > 0.0001 || len(history.Samples) != 3 {
+		t.Fatalf("unexpected shared URL usage history: %+v", history)
+	}
+}
+
+func TestUsageCollectionClaimIsHourlyPerURL(t *testing.T) {
+	app := testApp(t)
+	start := time.Date(2026, 8, 6, 0, 0, 0, 0, time.UTC)
+	due, err := app.claimUsageCollection("https://provider.example/token", start.Format(time.RFC3339))
+	if err != nil || !due {
+		t.Fatalf("first collection was not due: due=%v err=%v", due, err)
+	}
+	due, err = app.claimUsageCollection("https://provider.example/token", start.Add(59*time.Minute).Format(time.RFC3339))
+	if err != nil || due {
+		t.Fatalf("duplicate URL was collected before one hour: due=%v err=%v", due, err)
+	}
+	due, err = app.claimUsageCollection("https://provider.example/token", start.Add(time.Hour).Format(time.RFC3339))
+	if err != nil || !due {
+		t.Fatalf("URL was not collectible after one hour: due=%v err=%v", due, err)
+	}
+}
+
+func TestSubscriptionNamesMustBeUnique(t *testing.T) {
+	app := testApp(t)
+	create := func(name string) *httptest.ResponseRecorder {
+		body, _ := json.Marshal(subscription{Name: name, URL: "https://provider.example/sub", UserAgent: "clash-meta", Enabled: true})
+		request := httptest.NewRequest(http.MethodPost, "/api/subscriptions", strings.NewReader(string(body)))
+		recorder := httptest.NewRecorder()
+		app.handleSubscriptions(recorder, request)
+		return recorder
+	}
+	if recorder := create("Provider"); recorder.Code != http.StatusCreated {
+		t.Fatalf("first subscription returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if recorder := create(" provider "); recorder.Code != http.StatusConflict {
+		t.Fatalf("duplicate subscription name returned %d, want 409", recorder.Code)
+	}
+}
+
+func TestSubscriptionPathAndUsageAreManagedAutomatically(t *testing.T) {
+	app := testApp(t)
+	createBody, _ := json.Marshal(subscription{Name: "Provider One", URL: "https://provider.example/sub", Path: "./custom.yaml", UserAgent: "clash-meta", Enabled: true, UsedGB: 98, TotalGB: 100})
+	createRequest := httptest.NewRequest(http.MethodPost, "/api/subscriptions", strings.NewReader(string(createBody)))
+	createRecorder := httptest.NewRecorder()
+	app.handleSubscriptions(createRecorder, createRequest)
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("create returned %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+	items := app.listSubscriptions()
+	if len(items) != 1 || items[0].Path != "./proxy-providers/provider-one.yaml" {
+		t.Fatalf("expected automatic subscription path, got %+v", items)
+	}
+	if items[0].UsedGB != 0 || items[0].TotalGB != 0 {
+		t.Fatalf("create accepted manual usage: %+v", items[0])
+	}
+	if _, err := app.db.Exec(`UPDATE subscriptions SET used_gb=12.5,total_gb=50 WHERE id=?`, items[0].ID); err != nil {
+		t.Fatal(err)
+	}
+	patchBody, _ := json.Marshal(subscription{Name: "Provider Renamed", URL: "https://provider.example/sub", Path: "./another-custom.yaml", UserAgent: "clash-meta", Enabled: true, UpdateMode: "manual", IntervalMinutes: 1440, UsedGB: 1, TotalGB: 2})
+	patchRequest := httptest.NewRequest(http.MethodPatch, "/api/subscriptions/"+strconv.FormatInt(items[0].ID, 10), strings.NewReader(string(patchBody)))
+	patchRecorder := httptest.NewRecorder()
+	app.handleSubscriptionAction(patchRecorder, patchRequest)
+	if patchRecorder.Code != http.StatusOK {
+		t.Fatalf("patch returned %d: %s", patchRecorder.Code, patchRecorder.Body.String())
+	}
+	updated := app.listSubscriptions()[0]
+	if updated.Path != "./proxy-providers/provider-renamed.yaml" {
+		t.Fatalf("rename did not regenerate subscription path: %s", updated.Path)
+	}
+	if updated.UsedGB != 12.5 || updated.TotalGB != 50 {
+		t.Fatalf("patch overwrote provider usage: %+v", updated)
+	}
+}
+
+func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
+	app := testApp(t)
+	key := "monthly-test-key"
+	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,monthly_data_gb,created_at) VALUES(?,?,?,?,1,?,?)`, "Laptop", hashToken(key), key, "mo••ey", 25.5, time.Now().UTC().Format(time.RFC3339)); err != nil {
+		t.Fatal(err)
+	}
+	request := httptest.NewRequest(http.MethodGet, "/sub/"+key, nil)
+	recorder := httptest.NewRecorder()
+	app.handlePublicSubscription(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscription returned %d", recorder.Code)
+	}
+	header := recorder.Header().Get("Subscription-Userinfo")
+	usage := parseSubscriptionUserInfo(header)
+	if !usage.HasTotal || math.Abs(usage.TotalGB-25.5) > 0.0001 {
+		t.Fatalf("unexpected per-key allowance header %q", header)
+	}
+}
+
+func TestServiceRuleGroupsExpandInline(t *testing.T) {
+	app := testApp(t)
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Default','select','["DIRECT"]',1,'now'),('HomeIP','select','["DIRECT"]',1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,raw_content,created_at) VALUES('Fixture','https://provider.example/sub','clash-meta',1,?,'now')`, "proxies:\n  - name: SS fixture\n    type: ss\n    server: ss.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n"); err != nil {
+		t.Fatal(err)
+	}
+	privateKey := "service-rules-test-key"
+	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,created_at) VALUES('Test',?,?,?,1,'now')`, hashToken(privateKey), privateKey, "se••ey"); err != nil {
+		t.Fatal(err)
+	}
+	groups := app.listServiceRuleGroups()
+	if len(groups) != 6 {
+		t.Fatalf("got %d service rule groups, want 6", len(groups))
+	}
+	for _, group := range groups {
+		if group.RuleCount != len(defaultServiceRules[group.Name]) || group.RuleCount == 0 {
+			t.Fatalf("group %s has %d rules, want %d", group.Name, group.RuleCount, len(defaultServiceRules[group.Name]))
+		}
+	}
+	request := httptest.NewRequest(http.MethodGet, "/sub/"+privateKey, nil)
+	recorder := httptest.NewRecorder()
+	app.handlePublicSubscription(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("private subscription returned %d", recorder.Code)
+	}
+	config := recorder.Body.String()
+	var parsed map[string]any
+	if err := yaml.Unmarshal([]byte(config), &parsed); err != nil {
+		t.Fatalf("generated service config is invalid YAML: %v", err)
+	}
+	proxies := parsed["proxies"].([]any)
+	if len(proxies) != 1 || proxies[0].(map[string]any)["cipher"] != "aes-128-gcm" {
+		t.Fatalf("private subscription did not preserve Shadowsocks cipher")
+	}
+	for _, group := range groups {
+		for _, rule := range defaultServiceRules[group.Name] {
+			inline := "\n  - " + rule + "," + group.Target + "\n"
+			if !strings.Contains(config, inline) {
+				t.Fatalf("generated config is missing %s inline destination %q", group.Name, rule)
+			}
+		}
+	}
+	for _, expected := range []string{
+		"DOMAIN-SUFFIX,openai.com,AI",
+		"DOMAIN-SUFFIX,netflix.com,Netflix",
+		"DOMAIN-SUFFIX,youtube.com,YouTube",
+		"DOMAIN-SUFFIX,disneyplus.com,DisneyPlus",
+		"DOMAIN-SUFFIX,steampowered.com,Game",
+		"DOMAIN-SUFFIX,reddit.com,Reddit",
+	} {
+		if !strings.Contains(config, expected) {
+			t.Errorf("generated config is missing inline rule %q", expected)
+		}
+	}
+	for _, unsafe := range []string{"DOMAIN-SUFFIX,stripe.com,AI", "DOMAIN-SUFFIX,onetrust.com,Netflix", "DOMAIN-SUFFIX,execute-api.us-east-1.amazonaws.com,DisneyPlus"} {
+		if strings.Contains(config, unsafe) {
+			t.Errorf("generated config contains overly broad reference rule %q", unsafe)
+		}
+	}
+}
+
+func TestRuleTargetFollowsGroupRename(t *testing.T) {
+	app := testApp(t)
+	result, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('HOMEIP','select','["DIRECT"]',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID, _ := result.LastInsertId()
+	if _, err = app.db.Exec(`INSERT INTO rules(rule_type,match_value,target,priority,enabled,created_at) VALUES('DOMAIN-SUFFIX','reddit.com','HOMEIP',55,1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+
+	// Running migrations on an existing installation backfills the stable ID
+	// and adds the remaining editable Reddit rules once HOMEIP exists.
+	if err = app.migrate(); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = app.db.Exec(`UPDATE proxy_groups SET name='RESIDENTIAL' WHERE id=?`, groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	rules := app.listRules()
+	for _, rule := range rules {
+		if strings.Contains(rule.Match, "reddit") || rule.Match == "redd.it" {
+			if rule.TargetGroupID != groupID || rule.Target != "RESIDENTIAL" {
+				t.Fatalf("rule %q points to target %q (id %d), want RESIDENTIAL (id %d)", rule.Match, rule.Target, rule.TargetGroupID, groupID)
+			}
+		}
+	}
+	config := app.generateConfig()
+	if !strings.Contains(config, "DOMAIN-SUFFIX,reddit.com,RESIDENTIAL") {
+		t.Fatalf("generated config did not resolve renamed group:\n%s", config)
+	}
+}
+
+func TestDefaultFakeIPFilterIsValidYAML(t *testing.T) {
+	app := testApp(t)
+	var config map[string]any
+	if err := yaml.Unmarshal([]byte(app.generateConfig()), &config); err != nil {
+		t.Fatalf("generated config is invalid YAML: %v", err)
+	}
+	dns, ok := config["dns"].(map[string]any)
+	if !ok {
+		t.Fatalf("generated config has no DNS map")
+	}
+	items, ok := dns["fake-ip-filter"].([]any)
+	if !ok {
+		t.Fatalf("generated config has no fake-ip-filter list")
+	}
+	got := map[string]bool{}
+	for _, item := range items {
+		got[item.(string)] = true
+	}
+	for _, want := range configList(defaultDNSFakeIPFilter) {
+		if !got[want] {
+			t.Errorf("fake-ip-filter is missing %q", want)
+		}
+	}
+}

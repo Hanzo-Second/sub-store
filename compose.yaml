@@ -1,0 +1,17 @@
+services:
+  substore:
+    build:
+      context: .
+    image: substore:local
+    container_name: substore
+    restart: unless-stopped
+    environment:
+      SUBSTORE_PORT: "${SUBSTORE_PORT:-8080}"
+      SUBSTORE_BASE_URL: "${SUBSTORE_BASE_URL:-http://localhost:8080}"
+    ports:
+      - "${SUBSTORE_BIND_ADDRESS:-127.0.0.1}:${SUBSTORE_PORT:-8080}:${SUBSTORE_PORT:-8080}"
+    volumes:
+      - substore-data:/app/data
+
+volumes:
+  substore-data:

@@ -1,0 +1,18 @@
+# Runtime data
+/data/
+*.db
+*.db-shm
+*.db-wal
+
+# Local builds
+/substore
+*.test
+coverage.out
+
+# Local deployment configuration
+/.env
+
+# Editor and operating-system files
+.DS_Store
+.idea/
+.vscode/

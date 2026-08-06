@@ -1,0 +1,12 @@
+.git
+.gitignore
+data
+substore
+*.db
+*.db-shm
+*.db-wal
+README.md
+AGENTS.md
+docs
+deploy
+compose.yaml
