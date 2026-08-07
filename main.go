@@ -245,6 +245,7 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/auth/login", a.handleLogin)
 	mux.HandleFunc("/api/auth/logout", a.handleLogout)
 	mux.HandleFunc("/api/auth/me", a.auth(a.handleMe))
+	mux.HandleFunc("/api/auth/account", a.auth(a.handleAccount))
 	mux.HandleFunc("/api/settings", a.auth(a.handleSettings))
 	mux.HandleFunc("/api/subscriptions", a.auth(a.handleSubscriptions))
 	mux.HandleFunc("/api/subscriptions/", a.auth(a.handleSubscriptionAction))
@@ -688,6 +689,77 @@ func (a *App) handleLogout(w http.ResponseWriter, r *http.Request) {
 
 func (a *App) handleMe(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, http.StatusOK, r.Context().Value(userKey))
+}
+
+func (a *App) handleAccount(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodPatch {
+		methodNotAllowed(w)
+		return
+	}
+	var input struct {
+		Username           string `json:"username"`
+		CurrentPassword    string `json:"currentPassword"`
+		NewPassword        string `json:"newPassword"`
+		ConfirmNewPassword string `json:"confirmNewPassword"`
+	}
+	if !decodeJSON(w, r, &input) {
+		return
+	}
+	input.Username = strings.TrimSpace(input.Username)
+	if len(input.Username) < 2 {
+		writeError(w, http.StatusBadRequest, "Username must be at least 2 characters")
+		return
+	}
+	if input.NewPassword != "" && len(input.NewPassword) < 8 {
+		writeError(w, http.StatusBadRequest, "New password must be at least 8 characters")
+		return
+	}
+	if input.NewPassword != input.ConfirmNewPassword {
+		writeError(w, http.StatusBadRequest, "New passwords do not match")
+		return
+	}
+	user, ok := r.Context().Value(userKey).(User)
+	if !ok {
+		writeError(w, http.StatusUnauthorized, "Authentication required")
+		return
+	}
+	var passwordHash string
+	if err := a.db.QueryRow(`SELECT password_hash FROM users WHERE id=?`, user.ID).Scan(&passwordHash); err != nil || !verifyPassword(input.CurrentPassword, passwordHash) {
+		writeError(w, http.StatusUnauthorized, "Current password is incorrect")
+		return
+	}
+	if input.NewPassword != "" {
+		var err error
+		passwordHash, err = hashPassword(input.NewPassword)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	defer func() { _ = tx.Rollback() }()
+	if _, err = tx.Exec(`UPDATE users SET username=?,password_hash=? WHERE id=?`, input.Username, passwordHash, user.ID); err != nil {
+		writeError(w, http.StatusConflict, "Username is already in use")
+		return
+	}
+	if input.NewPassword != "" {
+		if cookie, cookieErr := r.Cookie("substore_session"); cookieErr == nil {
+			if _, err = tx.Exec(`DELETE FROM sessions WHERE user_id=? AND id<>?`, user.ID, cookie.Value); err != nil {
+				writeError(w, http.StatusInternalServerError, err.Error())
+				return
+			}
+		}
+	}
+	if err = tx.Commit(); err != nil {
+		writeError(w, http.StatusInternalServerError, err.Error())
+		return
+	}
+	user.Username = input.Username
+	writeJSON(w, http.StatusOK, user)
 }
 
 func (a *App) auth(next http.HandlerFunc) http.HandlerFunc {

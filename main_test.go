@@ -1,6 +1,7 @@
 package main
 
 import (
+	"context"
 	"database/sql"
 	"encoding/json"
 	"io/fs"
@@ -36,7 +37,7 @@ func TestFrontendAssetsAreEmbedded(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	for _, name := range []string{"index.html", "styles.css", "app.js"} {
+	for _, name := range []string{"index.html", "styles.css", "app.js", "favicon.svg"} {
 		contents, err := fs.ReadFile(webRoot, name)
 		if err != nil {
 			t.Fatalf("embedded %s: %v", name, err)
@@ -44,6 +45,58 @@ func TestFrontendAssetsAreEmbedded(t *testing.T) {
 		if len(contents) == 0 {
 			t.Fatalf("embedded %s is empty", name)
 		}
+	}
+}
+
+func TestAccountUpdateRequiresCurrentPasswordAndSignsOutOtherSessions(t *testing.T) {
+	app := testApp(t)
+	oldHash, err := hashPassword("old-password")
+	if err != nil {
+		t.Fatal(err)
+	}
+	result, err := app.db.Exec(`INSERT INTO users(username,password_hash,role,enabled,created_at) VALUES('admin',?,'admin',1,'now')`, oldHash)
+	if err != nil {
+		t.Fatal(err)
+	}
+	userID, _ := result.LastInsertId()
+	if _, err := app.db.Exec(`INSERT INTO sessions(id,user_id,expires_at,created_at) VALUES('current',?,'2099-01-01T00:00:00Z','now'),('other',?,'2099-01-01T00:00:00Z','now')`, userID, userID); err != nil {
+		t.Fatal(err)
+	}
+	requestBody := `{"username":"renamed","currentPassword":"old-password","newPassword":"new-password","confirmNewPassword":"new-password"}`
+	request := httptest.NewRequest(http.MethodPatch, "/api/auth/account", strings.NewReader(requestBody))
+	request.AddCookie(&http.Cookie{Name: "substore_session", Value: "current"})
+	request = request.WithContext(context.WithValue(request.Context(), userKey, User{ID: userID, Username: "admin", Role: "admin"}))
+	recorder := httptest.NewRecorder()
+	app.handleAccount(recorder, request)
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("account update returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	var username, passwordHash string
+	if err := app.db.QueryRow(`SELECT username,password_hash FROM users WHERE id=?`, userID).Scan(&username, &passwordHash); err != nil {
+		t.Fatal(err)
+	}
+	if username != "renamed" || verifyPassword("old-password", passwordHash) || !verifyPassword("new-password", passwordHash) {
+		t.Fatalf("account credentials were not updated correctly")
+	}
+	var currentSessions, otherSessions int
+	_ = app.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='current'`).Scan(&currentSessions)
+	_ = app.db.QueryRow(`SELECT COUNT(*) FROM sessions WHERE id='other'`).Scan(&otherSessions)
+	if currentSessions != 1 || otherSessions != 0 {
+		t.Fatalf("expected current session to remain and other session to be removed, got current=%d other=%d", currentSessions, otherSessions)
+	}
+}
+
+func TestAccountUpdateRejectsWrongCurrentPassword(t *testing.T) {
+	app := testApp(t)
+	passwordHash, _ := hashPassword("old-password")
+	result, _ := app.db.Exec(`INSERT INTO users(username,password_hash,role,enabled,created_at) VALUES('admin',?,'admin',1,'now')`, passwordHash)
+	userID, _ := result.LastInsertId()
+	request := httptest.NewRequest(http.MethodPatch, "/api/auth/account", strings.NewReader(`{"username":"renamed","currentPassword":"wrong-password"}`))
+	request = request.WithContext(context.WithValue(request.Context(), userKey, User{ID: userID, Username: "admin", Role: "admin"}))
+	recorder := httptest.NewRecorder()
+	app.handleAccount(recorder, request)
+	if recorder.Code != http.StatusUnauthorized {
+		t.Fatalf("wrong current password returned %d, want 401", recorder.Code)
 	}
 }
 

@@ -19,12 +19,23 @@ function renderTrafficPlaceholder() {
 renderTrafficPlaceholder();
 
 function removeEnvironmentManagedSettings() {
-  $('#settings-form .settings-section')?.remove();
+  const applicationSection = $$('#settings-form .settings-section').find((section) => section.querySelector('h2')?.textContent.trim() === 'Application');
+  applicationSection?.remove();
   $('#view-settings .eyebrow').textContent = 'SETTINGS';
-  $('#view-settings .subheading').textContent = 'Configure update behavior and client defaults.';
+  $('#view-settings .subheading').textContent = 'Configure your account and subscription update behavior.';
   $('.settings-note > p').textContent = 'The listener port and public URL come from SUBSTORE_PORT and SUBSTORE_BASE_URL. Other settings are stored in the SQLite data volume.';
 }
 removeEnvironmentManagedSettings();
+
+function addAccountSettings() {
+  if ($('#account-form')) return;
+  const form = document.createElement('form');
+  form.id = 'account-form';
+  form.className = 'panel account-settings-card';
+  form.innerHTML = '<h2>Administrator account</h2><p>Change the username used to sign in, or set a new password. Your current password is required.</p><div class="settings-grid"><label>Username<input name="username" autocomplete="username" minlength="2" required /></label><label>Current password<input name="currentPassword" type="password" autocomplete="current-password" required /></label><label>New password<input name="newPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Leave blank to keep current password" /></label><label>Confirm new password<input name="confirmNewPassword" type="password" autocomplete="new-password" minlength="8" placeholder="Repeat the new password" /></label></div><div class="account-settings-actions"><p class="account-settings-message" id="account-settings-message" aria-live="polite"></p><button class="button button-primary" type="submit">Save account</button></div>';
+  $('#settings-form').insertAdjacentElement('afterend', form);
+}
+addAccountSettings();
 
 function clearDemoContent() {
   $$('.kebab').forEach((button) => button.remove());
@@ -151,7 +162,7 @@ function showAuth(setup = false) {
 }
 
 function hideAuth() { $('#auth-screen').hidden = true; }
-function renderUser() { if (!state.user) return; const name = state.user.username || 'Admin'; $('.user-avatar').textContent = name[0].toUpperCase(); $('.user-card strong').textContent = name; $('.user-card span').textContent = state.user.role || 'Administrator'; }
+function renderUser() { if (!state.user) return; const name = state.user.username || 'Admin'; $('.user-avatar').textContent = name[0].toUpperCase(); $('.user-card strong').textContent = name; $('.user-card span').textContent = state.user.role || 'Administrator'; const username = $('#account-form [name="username"]'); if (username) username.value = name; }
 
 function renderAccessKeys() {
   const rows = $('#access-key-rows');
@@ -246,6 +257,35 @@ $('#save-settings').addEventListener('click', async () => {
   const data = Object.fromEntries(new FormData($('#settings-form')));
   delete data.port; delete data.baseUrl; data.defaultInterval = Number(data.defaultInterval); data.schedulerEnabled = data.schedulerEnabled === 'on';
   try { await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ...state.settings, ...data }) }); await refreshWorkspace(); showToast(); $('.toast strong').textContent = 'Settings saved'; $('.toast p').textContent = 'Changes are stored in the database.'; } catch (error) { alert(error.message); }
+});
+
+$('#account-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const form = event.currentTarget;
+  const data = Object.fromEntries(new FormData(form));
+  const message = $('#account-settings-message');
+  message.classList.remove('success');
+  message.textContent = '';
+  if (data.newPassword !== data.confirmNewPassword) {
+    message.textContent = 'New passwords do not match.';
+    return;
+  }
+  const submit = form.querySelector('button[type="submit"]');
+  submit.disabled = true;
+  try {
+    state.user = await api('/api/auth/account', { method: 'PATCH', body: JSON.stringify(data) });
+    renderUser();
+    form.elements.currentPassword.value = '';
+    form.elements.newPassword.value = '';
+    form.elements.confirmNewPassword.value = '';
+    message.classList.add('success');
+    message.textContent = data.newPassword ? 'Account updated. Other sessions were signed out.' : 'Username updated.';
+    showNotice('Account saved', 'Your sign-in details are updated.');
+  } catch (error) {
+    message.textContent = error.message;
+  } finally {
+    submit.disabled = false;
+  }
 });
 
 $('.more-button').addEventListener('click', (event) => { event.stopPropagation(); const menu = $('#account-menu'); const open = menu.classList.toggle('open'); $('.more-button').setAttribute('aria-expanded', String(open)); });
