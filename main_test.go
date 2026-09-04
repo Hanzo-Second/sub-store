@@ -4,6 +4,7 @@ import (
 	"context"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io/fs"
 	"math"
 	"net/http"
@@ -215,6 +216,73 @@ func TestSubscriptionNamesMustBeUnique(t *testing.T) {
 	}
 }
 
+func TestDeleteReportsNamedDependencies(t *testing.T) {
+	app := testApp(t)
+	subResult, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,created_at) VALUES('Shared source','https://provider.example/sub','clash-meta',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriptionID, _ := subResult.LastInsertId()
+	proxyResult, err := app.db.Exec(`INSERT INTO proxies(name,protocol,address,port,credential,enabled,created_at) VALUES('Manual node','ss','proxy.example.com',443,'secret',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyID, _ := proxyResult.LastInsertId()
+	providerResult, err := app.db.Exec(`INSERT INTO rule_providers(name,primary_url,enabled,created_at) VALUES('Streaming rules','https://rules.example/list',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	providerID, _ := providerResult.LastInsertId()
+	members, _ := json.Marshal([]string{fmt.Sprintf("subscription-id:%d", subscriptionID), "Manual node"})
+	groupResult, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Primary route','select',?,1,'now')`, string(members))
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID, _ := groupResult.LastInsertId()
+	parentMembers, _ := json.Marshal([]string{fmt.Sprintf("group-id:%d", groupID)})
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Parent route','select',?,1,'now')`, string(parentMembers)); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES('DOMAIN-SUFFIX','example.com','Primary route',?,10,1,'now'),('RULE-SET','Streaming rules','Primary route',?,20,1,'now')`, groupID, groupID); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO service_rule_groups(name,target_group_id,enabled,created_at) VALUES('AI traffic',?,1,'now')`, groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	deleteRecord := func(path string, handler func(http.ResponseWriter, *http.Request)) string {
+		t.Helper()
+		recorder := httptest.NewRecorder()
+		handler(recorder, httptest.NewRequest(http.MethodDelete, path, nil))
+		if recorder.Code != http.StatusConflict {
+			t.Fatalf("delete %s returned %d, want 409: %s", path, recorder.Code, recorder.Body.String())
+		}
+		return recorder.Body.String()
+	}
+	if body := deleteRecord("/api/subscriptions/"+strconv.FormatInt(subscriptionID, 10), app.handleSubscriptionAction); !strings.Contains(body, `proxy group \"Primary route\"`) {
+		t.Fatalf("subscription dependency was not named: %s", body)
+	}
+	if body := deleteRecord("/api/proxies/"+strconv.FormatInt(proxyID, 10), app.handleProxyAction); !strings.Contains(body, `proxy group \"Primary route\"`) {
+		t.Fatalf("proxy dependency was not named: %s", body)
+	}
+	groupBody := deleteRecord("/api/groups/"+strconv.FormatInt(groupID, 10), app.handleGroupAction)
+	for _, dependency := range []string{`proxy group \"Parent route\"`, `routing rule \"DOMAIN-SUFFIX example.com\"`, `service rule group \"AI traffic\"`} {
+		if !strings.Contains(groupBody, dependency) {
+			t.Fatalf("proxy group dependency %q was not named: %s", dependency, groupBody)
+		}
+	}
+	if body := deleteRecord("/api/rule-providers/"+strconv.FormatInt(providerID, 10), app.handleRuleProviderAction); !strings.Contains(body, `routing rule \"RULE-SET Streaming rules → Primary route\"`) {
+		t.Fatalf("provider dependency was not named: %s", body)
+	}
+}
+
+func TestProxyGroupRejectsDuplicateMembers(t *testing.T) {
+	app := testApp(t)
+	if err := app.validateGroupMembers("Duplicate group", []string{"DIRECT", "DIRECT"}, 0); err == nil || !strings.Contains(err.Error(), "only be added once") {
+		t.Fatalf("duplicate group members were accepted: %v", err)
+	}
+}
+
 func TestSubscriptionPathAndUsageAreManagedAutomatically(t *testing.T) {
 	app := testApp(t)
 	createBody, _ := json.Marshal(subscription{Name: "Provider One", URL: "https://provider.example/sub", Path: "./custom.yaml", UserAgent: "clash-meta", Enabled: true, UsedGB: 98, TotalGB: 100})
@@ -285,8 +353,8 @@ func TestServiceRuleGroupsExpandInline(t *testing.T) {
 		t.Fatal(err)
 	}
 	groups := app.listServiceRuleGroups()
-	if len(groups) != 6 {
-		t.Fatalf("got %d service rule groups, want 6", len(groups))
+	if len(groups) != len(defaultServiceRules) {
+		t.Fatalf("got %d service rule groups, want %d", len(groups), len(defaultServiceRules))
 	}
 	for _, group := range groups {
 		if group.RuleCount != len(defaultServiceRules[group.Name]) || group.RuleCount == 0 {
@@ -366,6 +434,31 @@ func TestRuleTargetFollowsGroupRename(t *testing.T) {
 	config := app.generateConfig()
 	if !strings.Contains(config, "DOMAIN-SUFFIX,reddit.com,RESIDENTIAL") {
 		t.Fatalf("generated config did not resolve renamed group:\n%s", config)
+	}
+}
+
+func TestManualProxyGroupMembershipFollowsRename(t *testing.T) {
+	app := testApp(t)
+	proxyResult, err := app.db.Exec(`INSERT INTO proxies(name,protocol,address,port,credential,enabled,created_at) VALUES('Old node','ss','proxy.example.com',443,'secret',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	proxyID, _ := proxyResult.LastInsertId()
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Manual route','select','["Old node"]',1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.migrateLegacyGroupReferences(); err != nil {
+		t.Fatal(err)
+	}
+	groups := app.listGroups()
+	if len(groups) != 1 || len(groups[0].Proxies) != 1 || groups[0].Proxies[0] != fmt.Sprintf("proxy-id:%d", proxyID) {
+		t.Fatalf("manual proxy membership was not migrated to a stable ID: %+v", groups)
+	}
+	if _, err := app.db.Exec(`UPDATE proxies SET name='Renamed node' WHERE id=?`, proxyID); err != nil {
+		t.Fatal(err)
+	}
+	if config := app.generateConfig(); !strings.Contains(config, "      - \"Renamed node\"") {
+		t.Fatalf("generated config did not resolve renamed manual proxy:\n%s", config)
 	}
 }
 

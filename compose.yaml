@@ -11,7 +11,4 @@ services:
     ports:
       - "${SUBSTORE_BIND_ADDRESS:-127.0.0.1}:${SUBSTORE_PORT:-8080}:${SUBSTORE_PORT:-8080}"
     volumes:
-      - substore-data:/app/data
-
-volumes:
-  substore-data:
+      - ./data:/app/data

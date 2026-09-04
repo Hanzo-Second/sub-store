@@ -4,6 +4,9 @@ package main
 // They are expanded as inline rules in generated YAML; the UI manages one
 // service group instead of hundreds of individual destination rows.
 var defaultServiceRules = map[string][]string{
+	"Apple Intelligence": {
+		"RULE-SET,apple-intelligence",
+	},
 	"AI": {
 		"DOMAIN,chat.openai.com.cdn.cloudflare.net",
 		"DOMAIN,gemini.google.com",

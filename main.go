@@ -89,6 +89,7 @@ type settingsPayload struct {
 	DNSDefaultNameservers string `json:"dnsDefaultNameservers"`
 	DNSNameservers        string `json:"dnsNameservers"`
 	DNSFallback           string `json:"dnsFallback"`
+	DNSPolicyGroupID      int64  `json:"dnsPolicyGroupId"`
 	DNSFallbackGeoIP      bool   `json:"dnsFallbackGeoIP"`
 	DNSFallbackIPCIDR     string `json:"dnsFallbackIPCIDR"`
 }
@@ -179,6 +180,7 @@ type ruleProvider struct {
 	Name            string `json:"name"`
 	Type            string `json:"type"`
 	Behavior        string `json:"behavior"`
+	Format          string `json:"format"`
 	PrimaryURL      string `json:"primaryUrl"`
 	BackupURL       string `json:"backupUrl"`
 	Path            string `json:"path"`
@@ -292,7 +294,7 @@ CREATE TABLE IF NOT EXISTS subscriptions (id INTEGER PRIMARY KEY AUTOINCREMENT, 
 CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, protocol TEXT NOT NULL, address TEXT NOT NULL, port INTEGER NOT NULL, credential TEXT NOT NULL, transport TEXT NOT NULL DEFAULT 'TCP', sni TEXT, skip_verify INTEGER NOT NULL DEFAULT 0, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_type TEXT NOT NULL, match_value TEXT NOT NULL, target TEXT NOT NULL, target_group_id INTEGER, priority INTEGER NOT NULL DEFAULT 100, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS service_rule_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, rules_json TEXT NOT NULL DEFAULT '[]', target_group_id INTEGER NOT NULL, priority INTEGER NOT NULL DEFAULT 55, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS rule_providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, provider_type TEXT NOT NULL DEFAULT 'http', behavior TEXT NOT NULL DEFAULT 'classical', primary_url TEXT NOT NULL, backup_url TEXT, path TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, update_mode TEXT NOT NULL DEFAULT 'manual', interval_minutes INTEGER NOT NULL DEFAULT 86400, last_update_at TEXT, last_error TEXT, content TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS rule_providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, provider_type TEXT NOT NULL DEFAULT 'http', behavior TEXT NOT NULL DEFAULT 'classical', provider_format TEXT NOT NULL DEFAULT 'yaml', primary_url TEXT NOT NULL, backup_url TEXT, path TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, update_mode TEXT NOT NULL DEFAULT 'manual', interval_minutes INTEGER NOT NULL DEFAULT 86400, last_update_at TEXT, last_error TEXT, content TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS access_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_value TEXT NOT NULL DEFAULT '', key_preview TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, monthly_data_gb REAL NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS proxy_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL, proxies_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscription_usage_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, url_hash TEXT NOT NULL UNIQUE, last_attempt_at TEXT NOT NULL DEFAULT '', last_collected_at TEXT NOT NULL DEFAULT '', last_used_gb REAL NOT NULL DEFAULT 0, last_total_gb REAL NOT NULL DEFAULT 0, last_expire_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
@@ -322,7 +324,7 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 			return alterErr
 		}
 	}
-	for _, column := range []string{"provider_type TEXT NOT NULL DEFAULT 'http'", "behavior TEXT NOT NULL DEFAULT 'classical'", "path TEXT NOT NULL DEFAULT ''"} {
+	for _, column := range []string{"provider_type TEXT NOT NULL DEFAULT 'http'", "behavior TEXT NOT NULL DEFAULT 'classical'", "provider_format TEXT NOT NULL DEFAULT 'yaml'", "path TEXT NOT NULL DEFAULT ''"} {
 		if _, alterErr := a.db.Exec(`ALTER TABLE rule_providers ADD COLUMN ` + column); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
 		}
@@ -359,6 +361,21 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 		}
 	}
 	if err := a.seedHomeIPRedditRules(); err != nil {
+		return err
+	}
+	if err := a.seedAppleIntelligenceRouting(); err != nil {
+		return err
+	}
+	if err := a.seedRedirHostDNSRouting(); err != nil {
+		return err
+	}
+	if err := a.migrateAppleIntelligenceTextRules(); err != nil {
+		return err
+	}
+	if err := a.migrateAppleIntelligenceServiceGroup(); err != nil {
+		return err
+	}
+	if err := a.migrateAppleIntelligenceProxyGroup(); err != nil {
 		return err
 	}
 	return a.seedServiceRuleGroups()
@@ -406,6 +423,274 @@ func (a *App) seedHomeIPRedditRules() error {
 		if _, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES('DOMAIN-SUFFIX',?,?,?,?,1,?)`, domain, groupName, groupID, 55+index, time.Now().UTC().Format(time.RFC3339)); err != nil {
 			return err
 		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (a *App) seedAppleIntelligenceRouting() error {
+	const migrationKey = "migration_apple_intelligence_routing_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	var homeID int64
+	var homeName string
+	if err := a.db.QueryRow(`SELECT id,name FROM proxy_groups WHERE LOWER(name)='homeip' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&homeID, &homeName); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	type providerDefinition struct {
+		name       string
+		behavior   string
+		format     string
+		primaryURL string
+		backupURL  string
+	}
+	providers := []providerDefinition{
+		{
+			name:       "apple-intelligence",
+			behavior:   "domain",
+			format:     "yaml",
+			primaryURL: "https://cdn.jsdelivr.net/gh/Accademia/Additional_Rule_For_Clash@main/AppleAI/AppleAI_Domain.yaml",
+			backupURL:  "https://raw.githubusercontent.com/Accademia/Additional_Rule_For_Clash/main/AppleAI/AppleAI_Domain.yaml",
+		},
+		{name: "icloud", behavior: "domain", format: "text", primaryURL: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/icloud.txt"},
+		{name: "apple", behavior: "domain", format: "text", primaryURL: "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/apple.txt"},
+	}
+	for _, provider := range providers {
+		path := defaultRuleProviderPath(provider.name)
+		var id int64
+		err = tx.QueryRow(`SELECT id FROM rule_providers WHERE LOWER(name)=LOWER(?) ORDER BY id LIMIT 1`, provider.name).Scan(&id)
+		if err == sql.ErrNoRows {
+			if _, err = tx.Exec(`INSERT INTO rule_providers(name,provider_type,behavior,provider_format,primary_url,backup_url,path,enabled,update_mode,interval_minutes,created_at) VALUES(?,'http',?,?,?,?,?,1,'manual',86400,?)`, provider.name, provider.behavior, provider.format, provider.primaryURL, provider.backupURL, path, now); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else if provider.name == "apple-intelligence" {
+			if _, err = tx.Exec(`UPDATE rule_providers SET name=?,provider_type='http',behavior=?,provider_format=?,primary_url=?,backup_url=?,path=?,enabled=1,interval_minutes=86400 WHERE id=?`, provider.name, provider.behavior, provider.format, provider.primaryURL, provider.backupURL, path, id); err != nil {
+				return err
+			}
+		}
+	}
+
+	type ruleDefinition struct {
+		match         string
+		target        string
+		targetGroupID any
+		priority      int
+	}
+	rules := []ruleDefinition{
+		{match: "apple-intelligence", target: homeName, targetGroupID: homeID, priority: 51},
+		{match: "icloud", target: "DIRECT", priority: 56},
+		{match: "apple", target: "DIRECT", priority: 57},
+	}
+	for _, rule := range rules {
+		var id int64
+		err = tx.QueryRow(`SELECT id FROM rules WHERE UPPER(rule_type)='RULE-SET' AND LOWER(match_value)=LOWER(?) ORDER BY id LIMIT 1`, rule.match).Scan(&id)
+		if err == sql.ErrNoRows {
+			if _, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES('RULE-SET',?,?,?,?,1,?)`, rule.match, rule.target, rule.targetGroupID, rule.priority, now); err != nil {
+				return err
+			}
+		} else if err != nil {
+			return err
+		} else {
+			if _, err = tx.Exec(`UPDATE rules SET target=?,target_group_id=?,priority=?,enabled=1 WHERE id=?`, rule.target, rule.targetGroupID, rule.priority, id); err != nil {
+				return err
+			}
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (a *App) seedRedirHostDNSRouting() error {
+	const migrationKey = "migration_redir_host_dns_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	var policyGroupID int64
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name) IN ('default','cheap') AND enabled=1 ORDER BY CASE WHEN LOWER(name)='default' THEN 0 ELSE 1 END,id LIMIT 1`).Scan(&policyGroupID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	const providerName = "geosite-cn"
+	const primaryURL = "https://cdn.jsdelivr.net/gh/Accademia/Additional_Rule_For_Clash@main/GeositeCN/GeositeCN_Domain.yaml"
+	const backupURL = "https://raw.githubusercontent.com/Accademia/Additional_Rule_For_Clash/main/GeositeCN/GeositeCN_Domain.yaml"
+	var providerID int64
+	err = tx.QueryRow(`SELECT id FROM rule_providers WHERE LOWER(name)=LOWER(?) ORDER BY id LIMIT 1`, providerName).Scan(&providerID)
+	if err == sql.ErrNoRows {
+		if _, err = tx.Exec(`INSERT INTO rule_providers(name,provider_type,behavior,provider_format,primary_url,backup_url,path,enabled,update_mode,interval_minutes,created_at) VALUES(?,'http','domain','yaml',?,?,?,1,'manual',86400,?)`, providerName, primaryURL, backupURL, defaultRuleProviderPath(providerName), now); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if _, err = tx.Exec(`UPDATE rule_providers SET name=?,provider_type='http',behavior='domain',provider_format='yaml',primary_url=?,backup_url=?,path=?,enabled=1,interval_minutes=86400 WHERE id=?`, providerName, primaryURL, backupURL, defaultRuleProviderPath(providerName), providerID); err != nil {
+		return err
+	}
+
+	var ruleID int64
+	err = tx.QueryRow(`SELECT id FROM rules WHERE UPPER(rule_type)='GEOIP' AND UPPER(match_value)='CN' ORDER BY id LIMIT 1`).Scan(&ruleID)
+	if err == sql.ErrNoRows {
+		if _, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES('GEOIP','CN','DIRECT',NULL,58,1,?)`, now); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if _, err = tx.Exec(`UPDATE rules SET target='DIRECT',target_group_id=NULL,priority=58,enabled=1 WHERE id=?`, ruleID); err != nil {
+		return err
+	}
+
+	settings := map[string]string{
+		"dns_enhanced_mode":   "redir-host",
+		"dns_nameservers":     "https://dns.alidns.com/dns-query, https://doh.pub/dns-query",
+		"dns_fallback":        "https://cloudflare-dns.com/dns-query, https://dns.google/dns-query",
+		"dns_policy_group_id": strconv.FormatInt(policyGroupID, 10),
+	}
+	for key, value := range settings {
+		if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (a *App) migrateAppleIntelligenceTextRules() error {
+	const migrationKey = "migration_apple_intelligence_text_rules_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	result, err := a.db.Exec(`UPDATE rule_providers SET behavior='classical',provider_format='text',primary_url=?,backup_url='',path=? WHERE LOWER(name)='apple-intelligence'`,
+		"https://raw.githubusercontent.com/ddgksf2013/Filter/refs/heads/master/AppleIntelligence.list", defaultRuleProviderPath("apple-intelligence"))
+	if err != nil {
+		return err
+	}
+	if affected, _ := result.RowsAffected(); affected == 0 {
+		return nil
+	}
+	_, err = a.db.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey)
+	return err
+}
+
+func (a *App) migrateAppleIntelligenceServiceGroup() error {
+	const migrationKey = "migration_apple_intelligence_service_group_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	var homeID int64
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name)='homeip' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&homeID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	var providerCount int
+	if err := a.db.QueryRow(`SELECT COUNT(*) FROM rule_providers WHERE LOWER(name)='apple-intelligence' AND enabled=1`).Scan(&providerCount); err != nil {
+		return err
+	}
+	if providerCount == 0 {
+		return nil
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	rulesJSON, _ := json.Marshal([]string{"RULE-SET,apple-intelligence"})
+	var serviceGroupID int64
+	err = tx.QueryRow(`SELECT id FROM service_rule_groups WHERE LOWER(name)='apple intelligence' ORDER BY id LIMIT 1`).Scan(&serviceGroupID)
+	if err == sql.ErrNoRows {
+		if _, err = tx.Exec(`INSERT INTO service_rule_groups(name,rules_json,target_group_id,priority,enabled,created_at) VALUES('Apple Intelligence',?,?,51,1,?)`, string(rulesJSON), homeID, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+	} else if err != nil {
+		return err
+	} else if _, err = tx.Exec(`UPDATE service_rule_groups SET rules_json=?,target_group_id=?,priority=51,enabled=1 WHERE id=?`, string(rulesJSON), homeID, serviceGroupID); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`DELETE FROM rules WHERE UPPER(rule_type)='RULE-SET' AND LOWER(match_value)='apple-intelligence'`); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+func (a *App) migrateAppleIntelligenceProxyGroup() error {
+	const migrationKey = "migration_apple_intelligence_proxy_group_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	var homeID, defaultID int64
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name)='homeip' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&homeID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name) IN ('default','cheap') AND enabled=1 ORDER BY CASE WHEN LOWER(name)='default' THEN 0 ELSE 1 END,id LIMIT 1`).Scan(&defaultID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	var groupID int64
+	err = tx.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name)='apple intelligence' ORDER BY id LIMIT 1`).Scan(&groupID)
+	if err == sql.ErrNoRows {
+		membersJSON, _ := json.Marshal([]string{fmt.Sprintf("group-id:%d", homeID), fmt.Sprintf("group-id:%d", defaultID), "DIRECT"})
+		result, insertErr := tx.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Apple Intelligence','select',?,1,?)`, string(membersJSON), time.Now().UTC().Format(time.RFC3339))
+		if insertErr != nil {
+			return insertErr
+		}
+		groupID, _ = result.LastInsertId()
+	} else if err != nil {
+		return err
+	} else {
+		membersJSON, _ := json.Marshal([]string{fmt.Sprintf("group-id:%d", homeID), fmt.Sprintf("group-id:%d", defaultID), "DIRECT"})
+		if _, err = tx.Exec(`UPDATE proxy_groups SET group_type='select',proxies_json=?,enabled=1 WHERE id=?`, string(membersJSON), groupID); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`UPDATE service_rule_groups SET target_group_id=? WHERE LOWER(name)='apple intelligence'`, groupID); err != nil {
+		return err
 	}
 	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
 		return err
@@ -517,6 +802,23 @@ func (a *App) migrateLegacyGroupReferences() error {
 	for _, item := range groups {
 		groupIDs[item.Name] = item.ID
 	}
+	proxyIDs := map[string]int64{}
+	rows, err := a.db.Query(`SELECT id,name FROM proxies`)
+	if err != nil {
+		return err
+	}
+	for rows.Next() {
+		var id int64
+		var name string
+		if err := rows.Scan(&id, &name); err != nil {
+			rows.Close()
+			return err
+		}
+		proxyIDs[name] = id
+	}
+	if err := rows.Close(); err != nil {
+		return err
+	}
 	for _, group := range groups {
 		changed := false
 		members := make([]string, 0, len(group.Proxies))
@@ -531,6 +833,9 @@ func (a *App) migrateLegacyGroupReferences() error {
 					member = fmt.Sprintf("group-id:%d", id)
 					changed = true
 				}
+			} else if id, ok := proxyIDs[member]; ok {
+				member = fmt.Sprintf("proxy-id:%d", id)
+				changed = true
 			}
 			members = append(members, member)
 		}
@@ -595,6 +900,8 @@ func (a *App) settings() settingsPayload {
 			result.DNSNameservers = value
 		case "dns_fallback":
 			result.DNSFallback = value
+		case "dns_policy_group_id":
+			result.DNSPolicyGroupID, _ = strconv.ParseInt(value, 10, 64)
 		case "dns_fallback_geoip":
 			result.DNSFallbackGeoIP = value == "true"
 		case "dns_fallback_ipcidr":
@@ -809,7 +1116,14 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 		writeError(w, http.StatusBadRequest, "Invalid client configuration")
 		return
 	}
-	values := map[string]string{"default_user_agent": strings.TrimSpace(input.DefaultUserAgent), "scheduler_enabled": strconv.FormatBool(input.SchedulerEnabled), "default_interval": strconv.Itoa(input.DefaultInterval), "mixed_port": strconv.Itoa(input.MixedPort), "allow_lan": strconv.FormatBool(input.AllowLAN), "bind_address": strings.TrimSpace(input.BindAddress), "mode": input.Mode, "log_level": input.LogLevel, "dns_enabled": strconv.FormatBool(input.DNSEnabled), "dns_ipv6": strconv.FormatBool(input.DNSIPv6), "dns_enhanced_mode": input.DNSEnhancedMode, "dns_fake_ip_range": strings.TrimSpace(input.DNSFakeIPRange), "dns_fake_ip_filter": strings.TrimSpace(input.DNSFakeIPFilter), "dns_use_hosts": strconv.FormatBool(input.DNSUseHosts), "dns_default_nameservers": strings.TrimSpace(input.DNSDefaultNameservers), "dns_nameservers": strings.TrimSpace(input.DNSNameservers), "dns_fallback": strings.TrimSpace(input.DNSFallback), "dns_fallback_geoip": strconv.FormatBool(input.DNSFallbackGeoIP), "dns_fallback_ipcidr": strings.TrimSpace(input.DNSFallbackIPCIDR)}
+	if input.DNSPolicyGroupID > 0 {
+		var count int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM proxy_groups WHERE id=? AND enabled=1`, input.DNSPolicyGroupID).Scan(&count); err != nil || count != 1 {
+			writeError(w, http.StatusBadRequest, "DNS proxy group not found")
+			return
+		}
+	}
+	values := map[string]string{"default_user_agent": strings.TrimSpace(input.DefaultUserAgent), "scheduler_enabled": strconv.FormatBool(input.SchedulerEnabled), "default_interval": strconv.Itoa(input.DefaultInterval), "mixed_port": strconv.Itoa(input.MixedPort), "allow_lan": strconv.FormatBool(input.AllowLAN), "bind_address": strings.TrimSpace(input.BindAddress), "mode": input.Mode, "log_level": input.LogLevel, "dns_enabled": strconv.FormatBool(input.DNSEnabled), "dns_ipv6": strconv.FormatBool(input.DNSIPv6), "dns_enhanced_mode": input.DNSEnhancedMode, "dns_fake_ip_range": strings.TrimSpace(input.DNSFakeIPRange), "dns_fake_ip_filter": strings.TrimSpace(input.DNSFakeIPFilter), "dns_use_hosts": strconv.FormatBool(input.DNSUseHosts), "dns_default_nameservers": strings.TrimSpace(input.DNSDefaultNameservers), "dns_nameservers": strings.TrimSpace(input.DNSNameservers), "dns_fallback": strings.TrimSpace(input.DNSFallback), "dns_policy_group_id": strconv.FormatInt(input.DNSPolicyGroupID, 10), "dns_fallback_geoip": strconv.FormatBool(input.DNSFallbackGeoIP), "dns_fallback_ipcidr": strings.TrimSpace(input.DNSFallbackIPCIDR)}
 	for key, value := range values {
 		_, _ = a.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	}
@@ -877,6 +1191,51 @@ func (a *App) subscriptionNameExists(name string, excludeID int64) bool {
 	return count > 0
 }
 
+func memberReferencesRecord(member, kind string, id int64, name string) bool {
+	member = strings.TrimSpace(member)
+	switch kind {
+	case "subscription":
+		return member == fmt.Sprintf("subscription-id:%d", id) || member == "subscription:"+name
+	case "proxy group":
+		return member == fmt.Sprintf("group-id:%d", id) || member == "group:"+name
+	case "manual proxy":
+		// Manual proxies currently use their names in group membership. Keep the
+		// ID form here as well so the guard remains correct after ID migration.
+		return member == name || member == fmt.Sprintf("proxy-id:%d", id)
+	default:
+		return false
+	}
+}
+
+func (a *App) dependentProxyGroups(kind string, id int64, name string) []string {
+	dependencies := []string{}
+	for _, group := range a.listGroups() {
+		if kind == "proxy group" && group.ID == id {
+			continue
+		}
+		for _, member := range group.Proxies {
+			if memberReferencesRecord(member, kind, id, name) {
+				dependencies = append(dependencies, fmt.Sprintf("proxy group %q", group.Name))
+				break
+			}
+		}
+	}
+	return dependencies
+}
+
+func dependencyConflictMessage(kind, name string, dependencies []string) string {
+	return fmt.Sprintf("Cannot delete %s %q. Used by: %s. Remove it from those items first.", kind, name, strings.Join(dependencies, ", "))
+}
+
+func writeDependencyConflict(w http.ResponseWriter, kind, name string, dependencies []string) {
+	writeJSON(w, http.StatusConflict, map[string]any{
+		"error":        dependencyConflictMessage(kind, name, dependencies),
+		"kind":         kind,
+		"name":         name,
+		"dependencies": dependencies,
+	})
+}
+
 func (a *App) handleSubscriptionAction(w http.ResponseWriter, r *http.Request) {
 	isUpdate := strings.HasSuffix(r.URL.Path, "/update")
 	isUsage := strings.HasSuffix(r.URL.Path, "/usage")
@@ -895,6 +1254,18 @@ func (a *App) handleSubscriptionAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		var name string
+		if err := a.db.QueryRow(`SELECT name FROM subscriptions WHERE id=?`, id).Scan(&name); err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "Subscription not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if dependencies := a.dependentProxyGroups("subscription", id, name); len(dependencies) > 0 {
+			writeDependencyConflict(w, "subscription", name, dependencies)
+			return
+		}
 		_, err := a.db.Exec(`DELETE FROM subscriptions WHERE id=?`, id)
 		if err != nil {
 			writeError(w, 500, err.Error())
@@ -1474,6 +1845,18 @@ func (a *App) handleProxyAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
+		var name string
+		if err := a.db.QueryRow(`SELECT name FROM proxies WHERE id=?`, id).Scan(&name); err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "Manual proxy not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		if dependencies := a.dependentProxyGroups("manual proxy", id, name); len(dependencies) > 0 {
+			writeDependencyConflict(w, "manual proxy", name, dependencies)
+			return
+		}
 		_, err := a.db.Exec(`DELETE FROM proxies WHERE id=?`, id)
 		if err != nil {
 			writeError(w, 500, err.Error())
@@ -1749,6 +2132,10 @@ func normalizeRuleProvider(x *ruleProvider) {
 	if x.Behavior != "domain" && x.Behavior != "ipcidr" && x.Behavior != "classical" {
 		x.Behavior = "classical"
 	}
+	x.Format = strings.ToLower(strings.TrimSpace(x.Format))
+	if x.Format != "yaml" && x.Format != "text" && x.Format != "mrs" {
+		x.Format = "yaml"
+	}
 	// Rule-provider files always live in the managed ruleset directory. The
 	// provider name is the single source of truth for the generated filename.
 	x.Path = defaultRuleProviderPath(x.Name)
@@ -1775,7 +2162,7 @@ func (a *App) handleRuleProviders(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	normalizeRuleProvider(&x)
-	result, err := a.db.Exec(`INSERT INTO rule_providers(name,provider_type,behavior,primary_url,backup_url,path,enabled,update_mode,interval_minutes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?)`, x.Name, x.Type, x.Behavior, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled || x.ID == 0), x.UpdateMode, x.IntervalMinutes, time.Now().UTC().Format(time.RFC3339))
+	result, err := a.db.Exec(`INSERT INTO rule_providers(name,provider_type,behavior,provider_format,primary_url,backup_url,path,enabled,update_mode,interval_minutes,created_at) VALUES(?,?,?,?,?,?,?,?,?,?,?)`, x.Name, x.Type, x.Behavior, x.Format, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled || x.ID == 0), x.UpdateMode, x.IntervalMinutes, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		writeError(w, 400, err.Error())
 		return
@@ -1785,7 +2172,7 @@ func (a *App) handleRuleProviders(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, x)
 }
 func (a *App) listRuleProviders() []ruleProvider {
-	rows, err := a.db.Query(`SELECT id,name,COALESCE(provider_type,'http'),COALESCE(behavior,'classical'),primary_url,COALESCE(backup_url,''),COALESCE(path,''),enabled,update_mode,interval_minutes,COALESCE(last_update_at,''),COALESCE(last_error,'') FROM rule_providers ORDER BY id DESC`)
+	rows, err := a.db.Query(`SELECT id,name,COALESCE(provider_type,'http'),COALESCE(behavior,'classical'),COALESCE(provider_format,'yaml'),primary_url,COALESCE(backup_url,''),COALESCE(path,''),enabled,update_mode,interval_minutes,COALESCE(last_update_at,''),COALESCE(last_error,'') FROM rule_providers ORDER BY id DESC`)
 	if err != nil {
 		return []ruleProvider{}
 	}
@@ -1794,7 +2181,7 @@ func (a *App) listRuleProviders() []ruleProvider {
 	for rows.Next() {
 		var x ruleProvider
 		var enabled int
-		_ = rows.Scan(&x.ID, &x.Name, &x.Type, &x.Behavior, &x.PrimaryURL, &x.BackupURL, &x.Path, &enabled, &x.UpdateMode, &x.IntervalMinutes, &x.LastUpdateAt, &x.LastError)
+		_ = rows.Scan(&x.ID, &x.Name, &x.Type, &x.Behavior, &x.Format, &x.PrimaryURL, &x.BackupURL, &x.Path, &enabled, &x.UpdateMode, &x.IntervalMinutes, &x.LastUpdateAt, &x.LastError)
 		normalizeRuleProvider(&x)
 		x.Enabled = enabled == 1
 		result = append(result, x)
@@ -1829,7 +2216,44 @@ func (a *App) handleRuleProviderAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		_, err := a.db.Exec(`DELETE FROM rule_providers WHERE id=?`, id)
+		var name string
+		if err := a.db.QueryRow(`SELECT name FROM rule_providers WHERE id=?`, id).Scan(&name); err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "Rule provider not found")
+			return
+		} else if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		rows, err := a.db.Query(`SELECT target FROM rules WHERE UPPER(rule_type)='RULE-SET' AND LOWER(match_value)=LOWER(?) ORDER BY priority,id`, name)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
+			return
+		}
+		dependencies := []string{}
+		for rows.Next() {
+			var target string
+			if rows.Scan(&target) == nil {
+				dependencies = append(dependencies, fmt.Sprintf("routing rule %q", "RULE-SET "+name+" → "+target))
+			}
+		}
+		rows.Close()
+		for _, group := range a.listServiceRuleGroups() {
+			for _, rule := range group.Rules {
+				parts := strings.SplitN(rule, ",", 2)
+				if len(parts) == 2 && strings.EqualFold(parts[0], "RULE-SET") && strings.EqualFold(strings.TrimSpace(parts[1]), name) {
+					dependencies = append(dependencies, fmt.Sprintf("service rule group %q", group.Name))
+					break
+				}
+			}
+		}
+		if strings.EqualFold(name, "geosite-cn") && a.settings().DNSEnhancedMode == "redir-host" {
+			dependencies = append(dependencies, "client DNS policy")
+		}
+		if len(dependencies) > 0 {
+			writeDependencyConflict(w, "rule provider", name, dependencies)
+			return
+		}
+		_, err = a.db.Exec(`DELETE FROM rule_providers WHERE id=?`, id)
 		if err != nil {
 			writeError(w, 500, err.Error())
 			return
@@ -1844,7 +2268,7 @@ func (a *App) handleRuleProviderAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		normalizeRuleProvider(&x)
-		_, err := a.db.Exec(`UPDATE rule_providers SET name=?,provider_type=?,behavior=?,primary_url=?,backup_url=?,path=?,enabled=?,update_mode=?,interval_minutes=? WHERE id=?`, x.Name, x.Type, x.Behavior, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled), x.UpdateMode, x.IntervalMinutes, id)
+		_, err := a.db.Exec(`UPDATE rule_providers SET name=?,provider_type=?,behavior=?,provider_format=?,primary_url=?,backup_url=?,path=?,enabled=?,update_mode=?,interval_minutes=? WHERE id=?`, x.Name, x.Type, x.Behavior, x.Format, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled), x.UpdateMode, x.IntervalMinutes, id)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -1948,6 +2372,17 @@ func groupReferences(members []string, groupNames map[int64]string) []string {
 }
 
 func (a *App) validateGroupMembers(name string, members []string, currentID int64) error {
+	seenMembers := map[string]bool{}
+	for _, member := range members {
+		key := strings.TrimSpace(member)
+		if strings.EqualFold(key, "DIRECT") {
+			key = "DIRECT"
+		}
+		if key != "" && seenMembers[key] {
+			return fmt.Errorf("each proxy group member can only be added once")
+		}
+		seenMembers[key] = true
+	}
 	existingGroups := a.listGroups()
 	groupNames := map[int64]string{}
 	for _, group := range existingGroups {
@@ -1992,25 +2427,52 @@ func (a *App) handleGroupAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodDelete {
-		var ruleCount int
-		if err := a.db.QueryRow(`SELECT COUNT(*) FROM rules WHERE target_group_id=?`, id).Scan(&ruleCount); err != nil {
+		var name string
+		if err := a.db.QueryRow(`SELECT name FROM proxy_groups WHERE id=?`, id).Scan(&name); err == sql.ErrNoRows {
+			writeError(w, http.StatusNotFound, "Proxy group not found")
+			return
+		} else if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if ruleCount > 0 {
-			writeError(w, http.StatusConflict, "Reassign or delete routing rules that use this proxy group first")
-			return
-		}
-		var serviceRuleGroupCount int
-		if err := a.db.QueryRow(`SELECT COUNT(*) FROM service_rule_groups WHERE target_group_id=?`, id).Scan(&serviceRuleGroupCount); err != nil {
+		dependencies := a.dependentProxyGroups("proxy group", id, name)
+		ruleRows, err := a.db.Query(`SELECT rule_type,match_value FROM rules WHERE target_group_id=? ORDER BY priority,id`, id)
+		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		if serviceRuleGroupCount > 0 {
-			writeError(w, http.StatusConflict, "Reassign or delete service rule groups that use this proxy group first")
+		for ruleRows.Next() {
+			var ruleType, match string
+			if ruleRows.Scan(&ruleType, &match) == nil {
+				dependencies = append(dependencies, fmt.Sprintf("routing rule %q", ruleType+" "+match))
+			}
+		}
+		ruleRows.Close()
+		serviceRows, err := a.db.Query(`SELECT name FROM service_rule_groups WHERE target_group_id=? ORDER BY priority,id`, id)
+		if err != nil {
+			writeError(w, http.StatusInternalServerError, err.Error())
 			return
 		}
-		_, err := a.db.Exec(`DELETE FROM proxy_groups WHERE id=?`, id)
+		for serviceRows.Next() {
+			var serviceName string
+			if serviceRows.Scan(&serviceName) == nil {
+				dependencies = append(dependencies, fmt.Sprintf("service rule group %q", serviceName))
+			}
+		}
+		serviceRows.Close()
+		var dnsPolicyGroupID int64
+		var dnsPolicyGroupValue string
+		if settingsErr := a.db.QueryRow(`SELECT value FROM settings WHERE key='dns_policy_group_id'`).Scan(&dnsPolicyGroupValue); settingsErr == nil {
+			dnsPolicyGroupID, _ = strconv.ParseInt(dnsPolicyGroupValue, 10, 64)
+		}
+		if dnsPolicyGroupID == id {
+			dependencies = append(dependencies, "client DNS policy")
+		}
+		if len(dependencies) > 0 {
+			writeDependencyConflict(w, "proxy group", name, dependencies)
+			return
+		}
+		_, err = a.db.Exec(`DELETE FROM proxy_groups WHERE id=?`, id)
 		if err != nil {
 			writeError(w, http.StatusInternalServerError, err.Error())
 			return
@@ -2173,6 +2635,95 @@ func configList(value string) []string {
 	}
 	return result
 }
+func dnsNameserversWithProxy(value, proxyGroup string) string {
+	items := configList(value)
+	for index, item := range items {
+		if proxyGroup != "" && !strings.Contains(item, "#") {
+			items[index] = item + "#" + proxyGroup
+		}
+	}
+	return strings.Join(items, "\n")
+}
+
+type dnsPolicyEntry struct {
+	priority int
+	sequence int
+	key      string
+	servers  string
+}
+
+func dnsPolicyKey(ruleType, match string) string {
+	switch strings.ToUpper(strings.TrimSpace(ruleType)) {
+	case "DOMAIN":
+		return strings.TrimSpace(match)
+	case "DOMAIN-SUFFIX":
+		return "+." + strings.TrimPrefix(strings.TrimSpace(match), ".")
+	case "RULE-SET":
+		return "rule-set:" + strings.TrimSpace(match)
+	default:
+		return ""
+	}
+}
+
+func buildDNSPolicyEntries(rules []routingRule, serviceGroups []serviceRuleGroup, providers []ruleProvider, domesticDNS, overseasDNS string) []dnsPolicyEntry {
+	domainProviders := map[string]bool{}
+	for _, provider := range providers {
+		if provider.Enabled && provider.Behavior != "ipcidr" {
+			domainProviders[strings.ToLower(provider.Name)] = true
+		}
+	}
+	entries := []dnsPolicyEntry{}
+	sequence := 0
+	appendRule := func(priority int, ruleType, match, target string) {
+		key := dnsPolicyKey(ruleType, match)
+		if key == "" || strings.EqualFold(target, "REJECT") {
+			return
+		}
+		if strings.EqualFold(ruleType, "RULE-SET") && !domainProviders[strings.ToLower(strings.TrimSpace(match))] {
+			return
+		}
+		servers := domesticDNS
+		if !strings.EqualFold(target, "DIRECT") {
+			servers = dnsNameserversWithProxy(overseasDNS, target)
+		}
+		entries = append(entries, dnsPolicyEntry{priority: priority, sequence: sequence, key: key, servers: servers})
+		sequence++
+	}
+	for _, rule := range rules {
+		if rule.Enabled {
+			appendRule(rule.Priority, rule.RuleType, rule.Match, rule.Target)
+		}
+	}
+	for _, group := range serviceGroups {
+		if !group.Enabled || group.Target == "" {
+			continue
+		}
+		for _, rule := range group.Rules {
+			parts := strings.SplitN(rule, ",", 2)
+			if len(parts) == 2 {
+				appendRule(group.Priority, parts[0], parts[1], group.Target)
+			}
+		}
+	}
+	entries = append(entries, dnsPolicyEntry{priority: 59, sequence: sequence, key: "rule-set:geosite-cn", servers: domesticDNS})
+	sort.SliceStable(entries, func(i, j int) bool {
+		if entries[i].priority == entries[j].priority {
+			return entries[i].sequence < entries[j].sequence
+		}
+		return entries[i].priority < entries[j].priority
+	})
+	seen := map[string]bool{}
+	result := make([]dnsPolicyEntry, 0, len(entries))
+	for _, entry := range entries {
+		if entry.key == "" || entry.servers == "" || seen[entry.key] {
+			continue
+		}
+		seen[entry.key] = true
+		result = append(result, entry)
+	}
+	return result
+}
+
 func writeConfigList(b *strings.Builder, indent, key string, value string) {
 	items := configList(value)
 	if len(items) == 0 {
@@ -2221,20 +2772,42 @@ func (a *App) generateConfig() string {
 	subscriptions := a.listSubscriptions()
 	ruleProviders := a.listRuleProviders()
 	client := a.settings()
+	dnsPolicyGroup := ""
+	for _, group := range groups {
+		if group.Enabled && group.ID == client.DNSPolicyGroupID {
+			dnsPolicyGroup = group.Name
+			break
+		}
+	}
 	var b strings.Builder
 	b.WriteString(fmt.Sprintf("mixed-port: %d\nallow-lan: %t\nbind-address: %q\nmode: %s\nlog-level: %s\n", client.MixedPort, client.AllowLAN, client.BindAddress, client.Mode, client.LogLevel))
 	b.WriteString("dns:\n")
 	b.WriteString(fmt.Sprintf("  enable: %t\n  ipv6: %t\n  enhanced-mode: %s\n", client.DNSEnabled, client.DNSIPv6, client.DNSEnhancedMode))
-	if client.DNSFakeIPRange != "" {
-		b.WriteString(fmt.Sprintf("  fake-ip-range: %q\n", client.DNSFakeIPRange))
+	if client.DNSEnhancedMode == "fake-ip" {
+		if client.DNSFakeIPRange != "" {
+			b.WriteString(fmt.Sprintf("  fake-ip-range: %q\n", client.DNSFakeIPRange))
+		}
+		writeConfigList(&b, "  ", "fake-ip-filter", client.DNSFakeIPFilter)
 	}
-	writeConfigList(&b, "  ", "fake-ip-filter", client.DNSFakeIPFilter)
 	b.WriteString(fmt.Sprintf("  use-hosts: %t\n", client.DNSUseHosts))
 	writeConfigList(&b, "  ", "default-nameserver", client.DNSDefaultNameservers)
-	writeConfigList(&b, "  ", "nameserver", client.DNSNameservers)
-	writeConfigList(&b, "  ", "fallback", client.DNSFallback)
-	b.WriteString(fmt.Sprintf("  fallback-filter:\n    geoip: %t\n", client.DNSFallbackGeoIP))
-	writeConfigList(&b, "    ", "ipcidr", client.DNSFallbackIPCIDR)
+	if client.DNSEnhancedMode == "redir-host" && dnsPolicyGroup != "" {
+		overseasNameservers := dnsNameserversWithProxy(client.DNSFallback, dnsPolicyGroup)
+		writeConfigList(&b, "  ", "proxy-server-nameserver", client.DNSNameservers)
+		writeConfigList(&b, "  ", "nameserver", overseasNameservers)
+		b.WriteString("  nameserver-policy:\n")
+		for _, policy := range buildDNSPolicyEntries(rules, serviceRuleGroups, ruleProviders, client.DNSNameservers, client.DNSFallback) {
+			writeConfigList(&b, "    ", fmt.Sprintf("%q", policy.key), policy.servers)
+		}
+		writeConfigList(&b, "    ", "\"+.*\"", overseasNameservers)
+	} else {
+		writeConfigList(&b, "  ", "nameserver", client.DNSNameservers)
+		if strings.TrimSpace(client.DNSFallback) != "" {
+			writeConfigList(&b, "  ", "fallback", client.DNSFallback)
+			b.WriteString(fmt.Sprintf("  fallback-filter:\n    geoip: %t\n", client.DNSFallbackGeoIP))
+			writeConfigList(&b, "    ", "ipcidr", client.DNSFallbackIPCIDR)
+		}
+	}
 	b.WriteString("\nproxies:\n")
 	for _, p := range proxies {
 		// Imported proxies are written from their original subscription maps below.
@@ -2286,7 +2859,7 @@ func (a *App) generateConfig() string {
 			continue
 		}
 		normalizeRuleProvider(&provider)
-		b.WriteString(fmt.Sprintf("  %q:\n    type: %s\n    behavior: %s\n    url: %q\n    path: %s\n    interval: %d\n", provider.Name, provider.Type, provider.Behavior, provider.PrimaryURL, provider.Path, maxInt(provider.IntervalMinutes, 60)))
+		b.WriteString(fmt.Sprintf("  %q:\n    type: %s\n    behavior: %s\n    format: %s\n    url: %q\n    path: %s\n    interval: %d\n", provider.Name, provider.Type, provider.Behavior, provider.Format, provider.PrimaryURL, provider.Path, maxInt(provider.IntervalMinutes, 60)))
 	}
 	b.WriteString("\nrules:\n")
 	type generatedRule struct {
@@ -2335,6 +2908,12 @@ func expandGroupMembers(members []string, proxies []proxyServer, subscriptions [
 	for _, item := range groups {
 		groupNames[item.ID] = item.Name
 	}
+	proxyNames := map[int64]string{}
+	for _, item := range proxies {
+		if item.ID > 0 {
+			proxyNames[item.ID] = item.Name
+		}
+	}
 	result := make([]string, 0, len(members))
 	seen := map[string]bool{}
 	appendMember := func(value string) {
@@ -2344,6 +2923,11 @@ func expandGroupMembers(members []string, proxies []proxyServer, subscriptions [
 		}
 	}
 	for _, member := range members {
+		if strings.HasPrefix(member, "proxy-id:") {
+			id, _ := strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(member, "proxy-id:")), 10, 64)
+			appendMember(proxyNames[id])
+			continue
+		}
 		if strings.HasPrefix(member, "subscription-id:") || strings.HasPrefix(member, "subscription:") {
 			subscriptionName := ""
 			if strings.HasPrefix(member, "subscription-id:") {
