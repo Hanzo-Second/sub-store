@@ -223,6 +223,7 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+	db.SetMaxOpenConns(1)
 	defer db.Close()
 	app := &App{db: db}
 	if err := app.migrate(); err != nil {
@@ -1080,7 +1081,11 @@ func (a *App) auth(next http.HandlerFunc) http.HandlerFunc {
 		var expires string
 		err = a.db.QueryRow(`SELECT u.id,u.username,u.role,s.expires_at FROM sessions s JOIN users u ON u.id=s.user_id WHERE s.id=? AND u.enabled=1`, cookie.Value).Scan(&user.ID, &user.Username, &user.Role, &expires)
 		if err != nil {
-			writeError(w, http.StatusUnauthorized, "Authentication required")
+			if err == sql.ErrNoRows {
+				writeError(w, http.StatusUnauthorized, "Authentication required")
+			} else {
+				writeError(w, http.StatusInternalServerError, err.Error())
+			}
 			return
 		}
 		until, _ := time.Parse(time.RFC3339, expires)

@@ -347,7 +347,7 @@ async function bootApp() {
     state.setupRequired = bootstrap.setupRequired;
     if (bootstrap.setupRequired) { showAuth(true); return; }
     try { state.user = await api('/api/auth/me'); renderUser(); } catch { showAuth(false); return; }
-    await refreshWorkspace();
+    try { await refreshWorkspace(); } catch (error) { console.error('Workspace load failed:', error); }
   } catch (error) {
     showAuth(false);
     $('#auth-error').textContent = apiBase ? 'SubStore is not running. Start it with “go run .” or “docker compose up --build”, then reload this page.' : `Could not connect to SubStore: ${error.message}`;
