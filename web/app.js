@@ -184,7 +184,7 @@ $('#toggle-advanced').addEventListener('click', () => { const open = $('#advance
 $('#protocol-select').addEventListener('change', (event) => { const hint = $('#credential-hint'); const hints = { vless: 'VLESS UUID', vmess: 'VMess UUID', trojan: 'Trojan password', ss: 'Base64 or plain password', hysteria2: 'Hysteria 2 password', tuic: 'TUIC UUID / password', socks5: 'Username:password (optional)', http: 'Username:password (optional)' }; hint.textContent = hints[event.target.value]; });
 $('#server-search').addEventListener('input', (event) => renderServers(event.target.value));
 $('#add-access-key').addEventListener('click', openAccessModal);
-['#copy-generated-key', '#copy-access-url', '#copy-config-access-url'].forEach((selector) => { const button = $(selector); if (button) button.innerHTML = copyIcon; });
+['#copy-generated-key', '#copy-access-url'].forEach((selector) => { const button = $(selector); if (button) button.innerHTML = copyIcon; });
 $('#manage-access-keys').addEventListener('click', () => selectView('access-keys'));
 $('#close-access-modal').addEventListener('click', closeAccessModal);
 $('#cancel-access-modal').addEventListener('click', closeAccessModal);

@@ -779,7 +779,10 @@ func (a *App) backfillSubscriptionPaths() error {
 	if err != nil {
 		return err
 	}
-	type subRow struct{ id int64; name string }
+	type subRow struct {
+		id   int64
+		name string
+	}
 	var items []subRow
 	for rows.Next() {
 		var r subRow
@@ -966,7 +969,7 @@ func (a *App) handleSetup(w http.ResponseWriter, r *http.Request) {
 	}
 	id, _ := result.LastInsertId()
 	user := User{ID: id, Username: strings.TrimSpace(input.Username), Role: "admin"}
-	a.startSession(w, user.ID)
+	a.startSession(w, r, user.ID)
 	writeJSON(w, http.StatusCreated, user)
 }
 
@@ -991,7 +994,7 @@ func (a *App) handleLogin(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	_, _ = a.db.Exec(`UPDATE users SET last_login_at=? WHERE id=?`, time.Now().UTC().Format(time.RFC3339), user.ID)
-	a.startSession(w, user.ID)
+	a.startSession(w, r, user.ID)
 	writeJSON(w, http.StatusOK, user)
 }
 
@@ -1105,11 +1108,12 @@ func (a *App) auth(next http.HandlerFunc) http.HandlerFunc {
 	}
 }
 
-func (a *App) startSession(w http.ResponseWriter, userID int64) {
+func (a *App) startSession(w http.ResponseWriter, r *http.Request, userID int64) {
 	token := randomToken(32)
 	now := time.Now().UTC()
 	_, _ = a.db.Exec(`INSERT INTO sessions(id,user_id,expires_at,created_at) VALUES(?,?,?,?)`, token, userID, now.Add(sessionTTL).Format(time.RFC3339), now.Format(time.RFC3339))
-	http.SetCookie(w, &http.Cookie{Name: "substore_session", Value: token, Path: "/", Expires: now.Add(sessionTTL), HttpOnly: true, SameSite: http.SameSiteLaxMode})
+	secure := r.TLS != nil || r.Header.Get("X-Forwarded-Proto") == "https"
+	http.SetCookie(w, &http.Cookie{Name: "substore_session", Value: token, Path: "/", Expires: now.Add(sessionTTL), HttpOnly: true, Secure: secure, SameSite: http.SameSiteLaxMode})
 }
 
 func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {

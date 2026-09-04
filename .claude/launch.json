@@ -1,0 +1,16 @@
+{
+  "version": "0.0.1",
+  "configurations": [
+    {
+      "name": "substore",
+      "runtimeExecutable": "go",
+      "runtimeArgs": ["run", "."],
+      "port": 8088,
+      "url": "http://localhost:8088",
+      "autoPort": false,
+      "env": {
+        "SUBSTORE_PORT": "8088"
+      }
+    }
+  ]
+}
