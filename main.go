@@ -779,18 +779,26 @@ func (a *App) backfillSubscriptionPaths() error {
 	if err != nil {
 		return err
 	}
-	defer rows.Close()
+	type subRow struct{ id int64; name string }
+	var items []subRow
 	for rows.Next() {
-		var id int64
-		var name string
-		if err := rows.Scan(&id, &name); err != nil {
+		var r subRow
+		if err := rows.Scan(&r.id, &r.name); err != nil {
+			rows.Close()
 			return err
 		}
-		if _, err := a.db.Exec(`UPDATE subscriptions SET path=? WHERE id=?`, defaultSubscriptionPath(name), id); err != nil {
+		items = append(items, r)
+	}
+	rows.Close()
+	if err := rows.Err(); err != nil {
+		return err
+	}
+	for _, item := range items {
+		if _, err := a.db.Exec(`UPDATE subscriptions SET path=? WHERE id=?`, defaultSubscriptionPath(item.name), item.id); err != nil {
 			return err
 		}
 	}
-	return rows.Err()
+	return nil
 }
 
 func (a *App) migrateLegacyGroupReferences() error {
@@ -1524,31 +1532,42 @@ func (a *App) scheduler() {
 	defer ticker.Stop()
 	for range ticker.C {
 		a.collectSubscriptionUsage()
-		if !a.settings().SchedulerEnabled {
+		settings := a.settings()
+		if !settings.SchedulerEnabled {
 			continue
 		}
 		rows, err := a.db.Query(`SELECT id,update_mode,interval_minutes,COALESCE(last_update_at,'') FROM subscriptions WHERE enabled=1 AND update_mode NOT IN ('manual','disabled')`)
 		if err != nil {
 			continue
 		}
+		type schedRow struct {
+			id       int64
+			mode     string
+			interval int64
+			last     string
+		}
+		var items []schedRow
 		for rows.Next() {
-			var id, interval int64
-			var mode, last string
-			if rows.Scan(&id, &mode, &interval, &last) != nil {
+			var r schedRow
+			if rows.Scan(&r.id, &r.mode, &r.interval, &r.last) != nil {
 				continue
 			}
+			items = append(items, r)
+		}
+		rows.Close()
+		for _, r := range items {
+			interval := r.interval
 			if interval < 1 {
-				interval = int64(a.settings().DefaultInterval)
+				interval = int64(settings.DefaultInterval)
 			}
-			lastAt, parseErr := time.Parse(time.RFC3339, last)
+			lastAt, parseErr := time.Parse(time.RFC3339, r.last)
 			if parseErr == nil && time.Since(lastAt) < time.Duration(interval)*time.Minute {
 				continue
 			}
-			if err := a.refreshSubscription(id); err != nil {
-				log.Printf("scheduled subscription update %d failed: %v", id, err)
+			if err := a.refreshSubscription(r.id); err != nil {
+				log.Printf("scheduled subscription update %d failed: %v", r.id, err)
 			}
 		}
-		rows.Close()
 	}
 }
 
