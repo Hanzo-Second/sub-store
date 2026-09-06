@@ -486,3 +486,39 @@ func TestDefaultFakeIPFilterIsValidYAML(t *testing.T) {
 		}
 	}
 }
+
+func TestPreferredRoutingGroupOrderMigration(t *testing.T) {
+	app := testApp(t)
+	if _, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,created_at) VALUES('光喵','https://cheap.example/sub','clash-meta',1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES
+		('Default','select','["DIRECT","subscription-id:1","subscription-id:99"]',1,'now'),
+		('HomeIP','select','["subscription-id:2"]',1,'now'),
+		('Reddit','select','["DIRECT","group-id:2","group-id:1"]',1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.migratePreferredRoutingGroupOrder(); err != nil {
+		t.Fatal(err)
+	}
+	groups := app.listGroups()
+	byName := map[string][]string{}
+	for _, group := range groups {
+		byName[group.Name] = group.Proxies
+	}
+	if got := strings.Join(byName["Default"], ","); got != "subscription-id:1,subscription-id:99,DIRECT" {
+		t.Fatalf("unexpected Default order: %s", got)
+	}
+	if got := strings.Join(byName["Reddit"], ","); got != "group-id:2,group-id:1,DIRECT" {
+		t.Fatalf("unexpected Reddit order: %s", got)
+	}
+}
+
+func TestPrivateSubscriptionTokenIsRedactedFromLogs(t *testing.T) {
+	if got := safeLogPath("/sub/a-private-access-key"); got != "/sub/[redacted]" {
+		t.Fatalf("private token leaked into log path: %s", got)
+	}
+	if got := safeLogPath("/api/subscriptions"); got != "/api/subscriptions" {
+		t.Fatalf("ordinary API path changed: %s", got)
+	}
+}

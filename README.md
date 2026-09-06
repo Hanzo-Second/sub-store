@@ -33,7 +33,12 @@ The Compose service listens on `127.0.0.1:8080` by default, so it is reachable b
 
 5. Open the public domain and create the administrator account.
 
-The SQLite database is stored in the `substore-data` Docker volume. `docker compose down` preserves it; do not use `docker compose down -v` unless you intend to delete all application data.
+The SQLite database is stored in `./data/substore.db` (for the requested remote layout: `/opt/sub-store/data/substore.db`). `docker compose down` preserves it. The container runs as UID 10001, so make the bind-mounted directory writable before first start:
+
+```sh
+mkdir -p data
+sudo chown -R 10001:10001 data
+```
 
 ## Updating
 

@@ -21,15 +21,6 @@ function renderTrafficPlaceholder() {
 }
 renderTrafficPlaceholder();
 
-function removeEnvironmentManagedSettings() {
-  const applicationSection = $$('#settings-form .settings-section').find((section) => section.querySelector('h2')?.textContent.trim() === 'Application');
-  applicationSection?.remove();
-  $('#view-settings .eyebrow').textContent = 'SETTINGS';
-  $('#view-settings .subheading').textContent = 'Configure your account and subscription update behavior.';
-  $('.settings-note > p').textContent = 'The listener port and public URL come from SUBSTORE_PORT and SUBSTORE_BASE_URL. Other settings are stored in the SQLite data volume.';
-}
-removeEnvironmentManagedSettings();
-
 function addAccountSettings() {
   if ($('#account-form')) return;
   const form = document.createElement('form');
@@ -388,7 +379,7 @@ document.addEventListener('submit', async (event) => {
 
 $('#save-settings').addEventListener('click', async () => {
   const data = Object.fromEntries(new FormData($('#settings-form')));
-  delete data.port; delete data.baseUrl; data.defaultInterval = Number(data.defaultInterval); data.schedulerEnabled = data.schedulerEnabled === 'on';
+  data.defaultInterval = Number(data.defaultInterval); data.schedulerEnabled = data.schedulerEnabled === 'on';
   try { await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ...state.settings, ...data }) }); await refreshWorkspace(); showToast(); $('.toast strong').textContent = 'Settings saved'; $('.toast p').textContent = 'Changes are stored in the database.'; } catch (error) { alert(error.message); }
 });
 

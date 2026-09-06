@@ -282,8 +282,15 @@ func logging(next http.Handler) http.Handler {
 	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 		start := time.Now()
 		next.ServeHTTP(w, r)
-		log.Printf("%s %s %s", r.Method, r.URL.Path, time.Since(start).Round(time.Millisecond))
+		log.Printf("%s %s %s", r.Method, safeLogPath(r.URL.Path), time.Since(start).Round(time.Millisecond))
 	})
+}
+
+func safeLogPath(path string) string {
+	if strings.HasPrefix(path, "/sub/") {
+		return "/sub/[redacted]"
+	}
+	return path
 }
 
 func (a *App) migrate() error {
@@ -379,7 +386,97 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 	if err := a.migrateAppleIntelligenceProxyGroup(); err != nil {
 		return err
 	}
-	return a.seedServiceRuleGroups()
+	if err := a.seedServiceRuleGroups(); err != nil {
+		return err
+	}
+	if err := a.migratePreferredRoutingGroupOrder(); err != nil {
+		return err
+	}
+	return nil
+}
+
+// migratePreferredRoutingGroupOrder makes new clients start with the intended
+// routes while preserving any additional members the user already configured.
+// Clash clients can still choose another member at any time.
+func (a *App) migratePreferredRoutingGroupOrder() error {
+	const migrationKey = "migration_preferred_routing_group_order_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+
+	var cheapSubscriptionID, defaultGroupID, homeGroupID, redditGroupID int64
+	if err := a.db.QueryRow(`SELECT id FROM subscriptions WHERE name='光喵' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&cheapSubscriptionID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name) IN ('default','cheap') AND enabled=1 ORDER BY CASE WHEN LOWER(name)='cheap' THEN 0 ELSE 1 END,id LIMIT 1`).Scan(&defaultGroupID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name)='homeip' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&homeGroupID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+	if err := a.db.QueryRow(`SELECT id FROM proxy_groups WHERE LOWER(name)='reddit' AND enabled=1 ORDER BY id LIMIT 1`).Scan(&redditGroupID); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	reorder := func(raw string, preferred []string) string {
+		var existing []string
+		_ = json.Unmarshal([]byte(raw), &existing)
+		seen := map[string]bool{}
+		ordered := make([]string, 0, len(existing)+len(preferred)+1)
+		appendMember := func(member string) {
+			if member != "" && member != "DIRECT" && !seen[member] {
+				seen[member] = true
+				ordered = append(ordered, member)
+			}
+		}
+		for _, member := range preferred {
+			appendMember(member)
+		}
+		for _, member := range existing {
+			appendMember(member)
+		}
+		ordered = append(ordered, "DIRECT")
+		encoded, _ := json.Marshal(ordered)
+		return string(encoded)
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	for _, item := range []struct {
+		id        int64
+		preferred []string
+	}{
+		{defaultGroupID, []string{fmt.Sprintf("subscription-id:%d", cheapSubscriptionID)}},
+		{redditGroupID, []string{fmt.Sprintf("group-id:%d", homeGroupID), fmt.Sprintf("group-id:%d", defaultGroupID)}},
+	} {
+		var raw string
+		if err = tx.QueryRow(`SELECT proxies_json FROM proxy_groups WHERE id=?`, item.id).Scan(&raw); err != nil {
+			return err
+		}
+		if _, err = tx.Exec(`UPDATE proxy_groups SET proxies_json=? WHERE id=?`, reorder(raw, item.preferred), item.id); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 func (a *App) backfillRuleGroupReferences() error {
