@@ -17,7 +17,7 @@ const dragIcon = '<svg viewBox="0 0 20 20"><path d="M6 6h8M6 10h8M6 14h8"/></svg
 function renderTrafficPlaceholder() {
   const panel = $('.traffic-panel');
   if (!panel) return;
-  panel.innerHTML = '<div class="panel-header"><div><h2>Traffic overview</h2><p>Bandwidth telemetry is not connected yet</p></div><span class="telemetry-badge">Coming soon</span></div><div class="traffic-empty"><div class="empty-icon">↗</div><h3>No traffic telemetry</h3><p>SubStore manages routing and configuration. Usage charts will appear after a traffic collector is connected.</p></div>';
+  panel.innerHTML = '<div class="panel-header"><div><h2>Subscription usage</h2><p>Provider-reported data allowance</p></div><span class="telemetry-badge">PROVIDER DATA</span></div><div class="traffic-empty"><div class="empty-icon">↗</div><h3>No usage reported yet</h3><p>Update your Cheap / 光喵 subscription to see its data allowance here.</p></div>';
 }
 renderTrafficPlaceholder();
 
@@ -37,7 +37,7 @@ function clearDemoContent() {
   $$('.rules-heading ~ .rule-row').forEach((row) => row.remove());
   $('.group-cards').innerHTML = '';
   $('#view-rule-providers .empty-preview').innerHTML = '';
-  $('.activity-list').innerHTML = '<div class="empty-activity"><div class="empty-icon">✓</div><h3>No activity yet</h3><p>Changes to this instance will appear here.</p></div>';
+  $('.activity-list').innerHTML = [['01', 'subscriptions', 'Connect your sources', 'Import and update provider subscriptions.'], ['02', 'groups', 'Choose how traffic flows', 'Organize sources into proxy groups.'], ['03', 'access-keys', 'Bring it to your devices', 'Create a private subscription URL.']].map(([number, view, title, detail]) => `<button class="workflow-link" data-view-target="${view}"><span>${number}</span><div><strong>${title}</strong><small>${detail}</small></div><span aria-hidden="true">↗</span></button>`).join('');
   $$('.stat-card .stat-value').forEach((value) => { value.textContent = '—'; });
   $$('.stat-card .stat-meta').forEach((value) => { value.textContent = 'No data yet'; });
   $('#view-config pre').textContent = '';
@@ -47,13 +47,13 @@ clearDemoContent();
 
 function serverRow(server, full = false) {
   const action = server.id < 0 ? '<span class="muted-text">Imported</span>' : `<span class="row-actions"><button class="icon-action" data-edit-server="${server.id}" aria-label="Edit ${escapeHTML(server.name)}" title="Edit server">${editIcon}</button><button class="icon-action danger" data-delete="${escapeHTML(server.name)}" data-delete-id="${server.id}" aria-label="Delete ${escapeHTML(server.name)}" title="Delete server">${trashIcon}</button></span>`;
-  if (full) return `<div class="table-row"><div class="server-name"><div class="server-logo ${server.color || 'blue'}">${server.logo || server.name[0]}</div><div><strong>${escapeHTML(server.name)}</strong><span>${server.port === '—' ? 'Imported provider' : 'Added manually'}</span></div></div><span class="protocol-tag">${server.type || 'Manual'}</span><span class="protocol-tag">${escapeHTML(server.protocol)}</span><span class="protocol-tag">${escapeHTML(server.address)}${server.port !== '—' ? `:${server.port}` : ''}</span><span class="status-pill ${server.status === 'Online' ? 'online' : 'offline'}"><i></i>${server.status}</span>${action}</div>`;
-  return `<div class="table-row"><div class="server-name"><div class="server-logo ${server.color || 'blue'}">${server.logo || server.name[0]}</div><div><strong>${escapeHTML(server.name)}</strong><span>${escapeHTML(server.address)}${server.port !== '—' ? `:${server.port}` : ''}</span></div></div><span class="protocol-tag">${escapeHTML(server.protocol)}</span><span class="latency">${server.latency || '—'}</span><span class="status-pill ${server.status === 'Online' ? 'online' : 'offline'}"><i></i>${server.status}</span>${action}</div>`;
+  if (full) return `<div class="table-row"><div class="server-name"><div class="server-logo ${server.color || 'blue'}">${escapeHTML(server.logo || server.name[0])}</div><div><strong>${escapeHTML(server.name)}</strong><span>${server.port === '—' ? 'Imported provider' : 'Added manually'}</span></div></div><span class="protocol-tag">${server.type || 'Manual'}</span><span class="protocol-tag">${escapeHTML(server.protocol)}</span><span class="protocol-tag">${escapeHTML(server.address)}${server.port !== '—' ? `:${server.port}` : ''}</span><span class="status-pill ${server.status === 'Online' ? 'online' : 'offline'}"><i></i>${server.status}</span>${action}</div>`;
+  return `<div class="table-row"><div class="server-name"><div class="server-logo ${server.color || 'blue'}">${escapeHTML(server.logo || server.name[0])}</div><div><strong>${escapeHTML(server.name)}</strong><span>${escapeHTML(server.address)}${server.port !== '—' ? `:${server.port}` : ''}</span></div></div><span class="protocol-tag">${escapeHTML(server.protocol)}</span><span class="latency">${server.latency || '—'}</span><span class="status-pill ${server.status === 'Online' ? 'online' : 'offline'}"><i></i>${server.status}</span>${action}</div>`;
 }
 
 function renderServers(filter = '') {
   const visible = servers.filter((server) => `${server.name} ${server.protocol} ${server.address}`.toLowerCase().includes(filter.toLowerCase()) && (serverFilters.protocol === 'all' || server.protocol.toLowerCase() === serverFilters.protocol) && (serverFilters.status === 'all' || server.status.toLowerCase() === serverFilters.status));
-  $('#server-rows').innerHTML = visible.slice(0, 4).map((server) => serverRow(server)).join('');
+  $('#server-rows').innerHTML = servers.slice(0, 4).map((server) => serverRow(server)).join('') || '<div class="source-empty">No proxy servers yet. Add a manual proxy or import a subscription to get started.</div>';
   renderProxySections(visible);
   $('#active-server-stat').textContent = servers.filter((server) => server.status === 'Online').length;
   $('#proxy-nav-count').textContent = servers.length;
@@ -83,25 +83,28 @@ async function copyText(value) {
   if (!value) return false;
   try { if (navigator.clipboard?.writeText) { await navigator.clipboard.writeText(value); return true; } } catch (_) { /* Fall back for non-secure local origins. */ }
   const input = document.createElement('textarea'); input.value = value; input.setAttribute('readonly', ''); input.style.cssText = 'position:fixed;opacity:0;pointer-events:none'; document.body.append(input); input.select();
-  const copied = document.execCommand('copy'); input.remove(); return copied;
+  try { return document.execCommand('copy'); } catch (_) { return false; } finally { input.remove(); }
 }
 function subscriptionURL(key) { return `${(state.settings?.baseUrl || location.origin).replace(/\/$/, '')}/sub/${key}`; }
 function showAccessKeyResult(key, title = 'Access key ready') { $('#access-result-title').textContent = title; $('#access-result-url').value = subscriptionURL(key); $('#access-result-backdrop').classList.add('open'); $('#access-result-backdrop').setAttribute('aria-hidden', 'false'); }
 function closeAccessKeyResult() { $('#access-result-backdrop').classList.remove('open'); $('#access-result-backdrop').setAttribute('aria-hidden', 'true'); $('#access-result-url').value = ''; }
 function setAccessKeyReplacement(form, replace) { form.elements.replaceKey.checked = replace; $('.key-mode-tabs').style.display = replace ? 'grid' : 'none'; $('#generated-key-field').classList.toggle('hide', !replace); $('#manual-key-field').classList.toggle('show', replace && $('.key-mode.active').dataset.keyMode === 'manual'); $('[name="manualKey"]').required = replace && $('.key-mode.active').dataset.keyMode === 'manual'; $('[name="generatedKey"]').required = replace && $('.key-mode.active').dataset.keyMode !== 'manual'; if (replace && !form.elements.generatedKey.value) form.elements.generatedKey.value = makeAccessKey(); }
 function ensureAccessEditField() { const form = $('#access-form'); if (form.elements.enabled) return; const enabled = document.createElement('label'); enabled.className = 'switch-label access-enabled-field'; enabled.innerHTML = '<span>Enable access key</span><input name="enabled" type="checkbox" checked /><i class="switch"></i>'; const replace = document.createElement('label'); replace.className = 'switch-label access-replace-field'; replace.innerHTML = '<span>Replace subscription key</span><input name="replaceKey" type="checkbox" /><i class="switch"></i>'; form.insertBefore(enabled, form.querySelector('.modal-footer')); form.insertBefore(replace, form.querySelector('.key-mode-tabs')); form.elements.replaceKey.addEventListener('change', () => setAccessKeyReplacement(form, form.elements.replaceKey.checked)); }
-function openAccessModal(item = null) { ensureAccessEditField(); const form = $('#access-form'); form.reset(); form.dataset.editId = item?.id || ''; $('#access-modal-title').textContent = item ? 'Edit access key' : 'Add access key'; form.querySelector('button[type="submit"]').textContent = item ? 'Save changes' : 'Create access key'; $('.access-replace-field').style.display = item ? 'flex' : 'none'; $('.key-mode-tabs').style.display = item ? 'none' : 'grid'; $('#generated-key-field').classList.toggle('hide', Boolean(item)); $('#manual-key-field').classList.remove('show'); $('[name="manualKey"]').required = false; $('[name="generatedKey"]').required = !item; if (item) { form.elements.keyName.value = item.name; form.elements.monthlyDataGB.value = item.monthlyDataGB || 0; form.elements.enabled.checked = item.enabled; setAccessKeyReplacement(form, false); } else { $('[name="generatedKey"]').value = makeAccessKey(); form.elements.monthlyDataGB.value = 0; form.elements.enabled.checked = true; } $('#access-modal-backdrop').classList.add('open'); $('#access-modal-backdrop').setAttribute('aria-hidden', 'false'); setTimeout(() => form.elements.keyName.focus(), 50); }
+function openAccessModal(item = null) { ensureAccessEditField(); const form = $('#access-form'); form.reset(); form.dataset.editId = item?.id || ''; $('#access-modal-title').textContent = item ? 'Edit access key' : 'Add access key'; form.querySelector('button[type="submit"]').textContent = item ? 'Save changes' : 'Create access key'; $('.access-replace-field').style.display = item ? 'flex' : 'none'; $('.key-mode-tabs').style.display = item ? 'none' : 'grid'; $('#generated-key-field').classList.toggle('hide', Boolean(item)); $('#manual-key-field').classList.remove('show'); $('[name="manualKey"]').required = false; $('[name="generatedKey"]').required = !item; if (item) { form.elements.keyName.value = item.name; form.elements.monthlyDataGB.value = item.monthlyDataGB || 0; form.elements.enabled.checked = item.enabled; setAccessKeyReplacement(form, false); } else { $$('[data-key-mode]').forEach((button) => { const active = button.dataset.keyMode === 'generated'; button.classList.toggle('active', active); button.setAttribute('aria-pressed', String(active)); }); $('[name="generatedKey"]').value = makeAccessKey(); form.elements.monthlyDataGB.value = 0; form.elements.enabled.checked = true; } $('#access-modal-backdrop').classList.add('open'); $('#access-modal-backdrop').setAttribute('aria-hidden', 'false'); setTimeout(() => form.elements.keyName.focus(), 50); }
 function closeAccessModal() { $('#access-modal-backdrop').classList.remove('open'); $('#access-modal-backdrop').setAttribute('aria-hidden', 'true'); $('#access-form').reset(); $('#access-form').dataset.editId = ''; $('#access-modal-title').textContent = 'Add access key'; $('#access-form').querySelector('button[type="submit"]').textContent = 'Create access key'; $('.access-replace-field').style.display = 'none'; $('.key-mode-tabs').style.display = 'grid'; $('#generated-key-field').classList.remove('hide'); }
 function showToast() { $('#toast').classList.add('show'); setTimeout(() => $('#toast').classList.remove('show'), 3400); }
 async function deleteServer(name, id) { if (id) { if (!(await confirmDelete(`Delete “${name}”?`, 'This manual proxy will be permanently removed from SubStore.'))) return; try { await api(`/api/proxies/${id}`, { method: 'DELETE' }); await refreshWorkspace(); } catch (error) { showRequestError(error); } return; } servers = servers.filter((server) => server.name !== name); localStorage.setItem('substore-servers', JSON.stringify(servers)); renderServers($('#server-search')?.value || ''); }
 
 function selectView(viewName) {
   if (!$(`#view-${viewName}`)) return;
-  $$('.nav-item[data-view]').forEach((item) => item.classList.toggle('active', item.dataset.view === viewName));
+  $$('.nav-item[data-view]').forEach((item) => { item.classList.toggle('active', item.dataset.view === viewName); if (item.dataset.view === viewName) item.setAttribute('aria-current', 'page'); else item.removeAttribute('aria-current'); });
+  $('#sidebar').classList.remove('open');
+  $('#mobile-menu').setAttribute('aria-expanded', 'false');
+  $('#mobile-menu').setAttribute('aria-label', 'Open navigation');
   $$('.view').forEach((view) => view.classList.remove('active-view'));
   $(`#view-${viewName}`).classList.add('active-view');
   localStorage.setItem('substore-active-view', viewName);
-  const labels = { 'rule-providers': 'Rule providers', 'access-keys': 'Access keys', overview: 'Dashboard' };
+  const labels = { 'rule-providers': 'Rule providers', 'access-keys': 'Access keys', overview: 'Dashboard', 'client-config': 'Client configuration', config: 'Generated config', proxies: 'Proxy servers', groups: 'Proxy groups', rules: 'Routing rules' };
   const label = labels[viewName] || viewName.charAt(0).toUpperCase() + viewName.slice(1);
   $('#page-breadcrumb').textContent = label;
   $('.page-body').scrollTop = 0;
@@ -170,7 +173,7 @@ $('#add-server').addEventListener('click', openModal);
 $('#close-modal').addEventListener('click', closeModal);
 $('#cancel-modal').addEventListener('click', closeModal);
 $('#modal-backdrop').addEventListener('click', (event) => { if (event.target === $('#modal-backdrop')) closeModal(); });
-document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeModal(); closeAccessModal(); } });
+document.addEventListener('keydown', (event) => { if (event.key === 'Escape') { closeModal(); closeAccessModal(); closeAccessKeyResult(); } });
 $('#toggle-advanced').addEventListener('click', () => { const open = $('#advanced-fields').classList.toggle('show'); $('#toggle-advanced').innerHTML = open ? 'Hide <span>⌃</span>' : 'Show <span>⌄</span>'; });
 $('#protocol-select').addEventListener('change', (event) => { const hint = $('#credential-hint'); const hints = { vless: 'VLESS UUID', vmess: 'VMess UUID', trojan: 'Trojan password', ss: 'Base64 or plain password', hysteria2: 'Hysteria 2 password', tuic: 'TUIC UUID / password', socks5: 'Username:password (optional)', http: 'Username:password (optional)' }; hint.textContent = hints[event.target.value]; });
 $('#server-search').addEventListener('input', (event) => renderServers(event.target.value));
@@ -187,9 +190,10 @@ $('#done-access-result').addEventListener('click', closeAccessKeyResult);
 $('#access-result-backdrop').addEventListener('click', (event) => { if (event.target === $('#access-result-backdrop')) closeAccessKeyResult(); });
 $('#copy-access-url').addEventListener('click', async () => { const copied = await copyText($('#access-result-url').value); showNotice(copied ? 'Subscription URL copied' : 'Copy failed', copied ? 'Paste it into Clash, Mihomo, or OpenClash.' : 'Select the URL and copy it manually.'); });
 $('#regenerate-key').addEventListener('click', () => { $('[name="generatedKey"]').value = makeAccessKey(); });
-$$('[data-key-mode]').forEach((button) => button.addEventListener('click', () => { $$('[data-key-mode]').forEach((item) => item.classList.toggle('active', item === button)); const manual = button.dataset.keyMode === 'manual'; $('#manual-key-field').classList.toggle('show', manual); $('#generated-key-field').classList.toggle('hide', manual); $('[name="manualKey"]').required = manual; $('[name="generatedKey"]').required = !manual; }));
+$$('[data-key-mode]').forEach((button) => button.addEventListener('click', () => { $$('[data-key-mode]').forEach((item) => { item.classList.toggle('active', item === button); item.setAttribute('aria-pressed', String(item === button)); }); const manual = button.dataset.keyMode === 'manual'; $('#manual-key-field').classList.toggle('show', manual); $('#generated-key-field').classList.toggle('hide', manual); $('[name="manualKey"]').required = manual; $('[name="generatedKey"]').required = !manual; }));
 renderServers();
-selectView(localStorage.getItem('substore-active-view') || 'overview');
+const savedView = localStorage.getItem('substore-active-view');
+selectView(savedView && document.getElementById(`view-${savedView}`) ? savedView : 'overview');
 
 const apiBase = location.protocol === 'file:' ? 'http://localhost:8080' : '';
 const api = async (path, options = {}) => {
@@ -276,6 +280,7 @@ const state = { setupRequired: false, settings: null, accessKeys: [], subscripti
 
 function showAuth(setup = false) {
   $('#auth-screen').hidden = false;
+  $('.app-shell').inert = true;
   $('#auth-eyebrow').textContent = setup ? 'FIRST RUN SETUP' : 'PRIVATE CONTROL PLANE';
   $('#auth-title').textContent = setup ? 'Create your admin account' : 'Welcome back';
   $('#auth-subtitle').textContent = setup ? 'Set up the account used to protect this self-hosted instance.' : 'Sign in to manage your proxy network.';
@@ -285,7 +290,7 @@ function showAuth(setup = false) {
   $('#auth-error').textContent = '';
 }
 
-function hideAuth() { $('#auth-screen').hidden = true; }
+function hideAuth() { $('#auth-screen').hidden = true; $('.app-shell').inert = false; }
 function renderUser() { if (!state.user) return; const name = state.user.username || 'Admin'; $('.user-avatar').textContent = name[0].toUpperCase(); $('.user-card strong').textContent = name; $('.user-card span').textContent = state.user.role || 'Administrator'; const username = $('#account-form [name="username"]'); if (username) username.value = name; }
 
 function renderAccessKeys() {
@@ -311,7 +316,7 @@ function updateConfigAccessKeyURL() {
   const id = $('#config-access-key-select').value;
   const key = state.accessKeys.find((item) => String(item.id) === id);
   const url = key?.key ? subscriptionURL(key.key) : '';
-  $('#config-share-url-text').textContent = url || 'This key was created before saved keys. Replace it in Access keys to copy it here.';
+  $('#config-share-url-text').textContent = url || (key ? 'Replace this key to access its URL.' : 'No access key selected');
   $('#config-access-key-hint').textContent = key?.key ? '' : key ? 'Replace this access key once to make it available here.' : 'Create an access key to get a private subscription URL.';
   $('#copy-config-access-url').disabled = !url;
 }
@@ -338,7 +343,7 @@ async function bootApp() {
     state.setupRequired = bootstrap.setupRequired;
     if (bootstrap.setupRequired) { showAuth(true); return; }
     try { state.user = await api('/api/auth/me'); renderUser(); } catch { showAuth(false); return; }
-    try { await refreshWorkspace(); } catch (error) { console.error('Workspace load failed:', error); }
+    try { await refreshWorkspace(); } catch (error) { showRequestError(error); }
   } catch (error) {
     showAuth(false);
     $('#auth-error').textContent = apiBase ? 'SubStore is not running. Start it with “go run .” or “docker compose up --build”, then reload this page.' : `Could not connect to SubStore: ${error.message}`;
@@ -728,7 +733,21 @@ function renderRuleProviders(items) {
   $('[data-add-provider]')?.addEventListener('click', () => openProviderModal());
 }
 
-async function refreshConfig() { try { const yaml = await api('/api/config/preview'); renderConfigYAML(yaml); } catch (error) { console.warn(error); } }
+async function refreshConfig() {
+  const copyButton = $('#view-config .code-toolbar .text-button');
+  copyButton.disabled = true;
+  try {
+    const yaml = await api('/api/config/preview');
+    renderConfigYAML(yaml);
+    copyButton.disabled = false;
+    return true;
+  } catch (error) {
+    $('#view-config pre').textContent = 'Configuration could not be loaded. Use Regenerate config to try again.';
+    $('.config-quick-links').replaceChildren();
+    showRequestError(error);
+    return false;
+  }
+}
 function showNotice(title, message) { $('.toast strong').textContent = title; $('.toast p').textContent = message; showToast(); }
 function renderClientConfig(settings) {
   const form = $('#client-config-form');
@@ -761,21 +780,21 @@ refreshWorkspace = async function refreshWorkspaceWithAllData() {
   state.accessKeys = accessKeys; state.settings = settings; state.groups = groups; state.providers = providers; state.serviceRuleGroups = serviceRuleGroups; state.subscriptions = subscriptions; workspaceSubscriptions = subscriptions;
   renderServers($('#server-search')?.value || ''); renderAccessKeys(); renderSubscriptions(subscriptions); renderRules(rules); renderServiceRuleGroups(serviceRuleGroups); renderGroups(groups); renderRuleProviders(providers); refreshConfig();
   $('.nav-count').textContent = subscriptions.length;
-  const statValues = $$('.stat-card .stat-value'); if (statValues[0]) statValues[0].textContent = proxyData.filter((item) => item.enabled).length; if (statValues[1]) statValues[1].textContent = subscriptions.length;
+  renderDashboard(proxyData, subscriptions, groups, accessKeys, rules, providers);
   const settingsForm = $('#settings-form'); if (settingsForm) Object.entries(settings).forEach(([key, value]) => { const field = settingsForm.elements[key]; if (!field) return; if (field.type === 'checkbox') field.checked = value; else field.value = value; }); renderClientConfig(settings);
 };
 
 document.addEventListener('click', (event) => {
   const target = event.target.closest('button');
-  if (!target) return;
+  if (!target || target.closest('.modal')) return;
   if (target.id === 'subscription-action' || target.matches('[data-add-subscription]')) { event.preventDefault(); event.stopImmediatePropagation(); openSubscriptionModal(); }
   else if (target.textContent.trim().includes('Add rule provider') || target.matches('[data-add-provider]')) { openProviderModal(); }
   else if (target.textContent.trim().includes('Add rule') && !target.closest('#subscription-form')) { openRuleModal(); }
   else if (target.textContent.trim().includes('Add group')) { openGroupModal(); }
-  if (target.textContent.trim() === 'View all →') { selectView('rules'); }
-  if (target.textContent.trim() === 'Copy YAML') { navigator.clipboard?.writeText($('#view-config pre')?.textContent || ''); showNotice('YAML copied', 'The generated configuration is on your clipboard.'); }
-  if (target.textContent.trim() === 'Regenerate config') { refreshConfig(); showNotice('Config regenerated', 'The latest configuration is ready.'); }
-  if (target.classList.contains('icon-button')) showNotice('No new notifications', 'Your workspace is up to date.');
+
+  if (target.textContent.trim() === 'Copy YAML') { copyText($('#view-config pre')?.textContent || '').then((copied) => showNotice(copied ? 'YAML copied' : 'Copy failed', copied ? 'The generated configuration is on your clipboard.' : 'Select the configuration and copy it manually.')); }
+  if (target.textContent.trim() === 'Regenerate config') { target.disabled = true; refreshConfig().then((success) => { if (success) showNotice('Config regenerated', 'The latest configuration is ready.'); }).finally(() => { target.disabled = false; }); }
+
 }, true);
 
 const closeModalBindings = [['subscription-modal-backdrop', '#subscription-form', 'close-subscription-modal', 'cancel-subscription-modal'], ['rule-modal-backdrop', '#rule-form', 'close-rule-modal', 'cancel-rule-modal'], ['provider-modal-backdrop', '#provider-form', 'close-provider-modal', 'cancel-provider-modal'], ['group-modal-backdrop', '#group-form', 'close-group-modal', 'cancel-group-modal']];
@@ -801,6 +820,54 @@ const protocolFilter = $('#protocol-filter');
 const statusFilter = $('#status-filter');
 protocolFilter?.addEventListener('change', (event) => { serverFilters.protocol = event.target.value; renderServers($('#server-search')?.value || ''); });
 statusFilter?.addEventListener('change', (event) => { serverFilters.status = event.target.value; renderServers($('#server-search')?.value || ''); });
-$$('.view#view-overview .select-button').forEach((button) => button.addEventListener('click', () => showNotice('Traffic range', 'The dashboard is showing the last 7 days.')));
+
 
 bootApp();
+
+// Dashboard values come exclusively from the current instance.
+function renderDashboard(proxies, subscriptions, groups, keys, rules, providers) {
+  const values = [proxies.filter((item) => item.enabled).length, subscriptions.length, groups.length, keys.filter((item) => item.enabled).length];
+  const notes = ['Available in your configuration', 'Connected provider sources', 'Selection and failover policies', 'Active private subscription URLs'];
+  $$('.stat-card').forEach((card, index) => { card.querySelector('.stat-value').textContent = values[index]; card.querySelector('.stat-meta').textContent = notes[index]; });
+  $$('.health-row strong').forEach((node, index) => { node.textContent = [groups.length, rules.length, providers.length][index]; });
+  const cheap = subscriptions.find((item) => item.name.includes('光喵')) || subscriptions.find((item) => /cheap/i.test(item.name));
+  if (!cheap || !(Number(cheap.totalGB) > 0)) { renderTrafficPlaceholder(); return; }
+  const total = Number(cheap.totalGB), used = Number(cheap.usedGB || 0);
+  const percent = Math.min(100, Math.max(0, used / total * 100));
+  $('.traffic-panel').innerHTML = `<div class="panel-header"><div><h2>Subscription usage</h2><p>${escapeHTML(cheap.name)} · Provider-reported allowance</p></div><span class="telemetry-badge">PROVIDER DATA</span></div><div class="dashboard-usage"><div class="usage-total">${used.toFixed(2)} <small>GB</small></div><p>of ${total.toFixed(2)} GB used</p><div class="subscription-progress" role="progressbar" aria-label="Subscription allowance used" aria-valuemin="0" aria-valuemax="100" aria-valuenow="${percent.toFixed(1)}"><span style="width:${percent}%"></span></div><p>${Math.max(0, total-used).toFixed(2)} GB remaining · ${cheap.lastSuccessAt ? `Updated ${escapeHTML(cheap.lastSuccessAt)}` : 'No successful update yet'}</p></div>`;
+}
+
+$('#mobile-menu').addEventListener('click', () => {
+  const open = $('#sidebar').classList.toggle('open');
+  $('#mobile-menu').setAttribute('aria-expanded', String(open));
+  $('#mobile-menu').setAttribute('aria-label', open ? 'Close navigation' : 'Open navigation');
+});
+document.addEventListener('click', (event) => {
+  if (!event.target.closest('#sidebar, #mobile-menu')) { $('#sidebar').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); $('#mobile-menu').setAttribute('aria-label', 'Open navigation'); }
+});
+document.addEventListener('keydown', (event) => {
+  if (event.key === 'Escape' && $('#sidebar').classList.contains('open')) { $('#sidebar').classList.remove('open'); $('#mobile-menu').setAttribute('aria-expanded', 'false'); $('#mobile-menu').setAttribute('aria-label', 'Open navigation'); $('#mobile-menu').focus(); }
+});
+
+// Keep keyboard focus inside visible dialogs and return it to the opener.
+let dialogOpener = null;
+let activeDialog = null;
+const dialogObserver = new MutationObserver(() => {
+  const next = $$('.modal-backdrop.open').at(-1)?.querySelector('.modal') || null;
+  if (next === activeDialog) return;
+  if (next && !activeDialog) dialogOpener = document.activeElement;
+  activeDialog = next;
+  $('.app-shell').inert = Boolean(next) || !$('#auth-screen').hidden;
+  if (next) next.querySelector('input:not([type="hidden"]), button, select, textarea')?.focus();
+  else if (dialogOpener?.isConnected) { dialogOpener.focus(); dialogOpener = null; }
+});
+dialogObserver.observe(document.body, { subtree: true, attributes: true, attributeFilter: ['class'] });
+document.addEventListener('keydown', (event) => {
+  if (event.key !== 'Tab') return;
+  const dialog = activeDialog || (!$('#auth-screen').hidden ? $('#auth-screen') : null);
+  if (!dialog) return;
+  const controls = [...dialog.querySelectorAll('button:not(:disabled), input:not(:disabled), select:not(:disabled), textarea:not(:disabled), [tabindex="0"]')].filter((node) => node.getClientRects().length);
+  const first = controls[0], last = controls.at(-1);
+  if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
+  else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+});
