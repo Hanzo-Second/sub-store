@@ -1,3 +1,16 @@
+/* Bundled locally so configuration stays readable without external font services. */
+@font-face {
+  font-family: "JetBrains Mono";
+  src: url("fonts/JetBrainsMono-Regular.woff2") format("woff2");
+  font-style: normal;
+  font-weight: 400;
+  font-display: swap;
+}
+
+:root {
+  --font-code: "JetBrains Mono", "SFMono-Regular", Consolas, "Liberation Mono", monospace;
+}
+
 :root {
   --bg: #f5f7fb;
   --surface: #fff;
@@ -169,7 +182,7 @@ body {
   box-shadow: inset 2px 0 0 #6483ff;
 }
 .nav-count {
-  font: 500 11px "DM Mono";
+  font: 500 11px var(--font-code);
   margin-left: auto;
   background: rgba(255, 255, 255, 0.1);
   border-radius: 10px;
@@ -314,7 +327,7 @@ body {
 }
 .eyebrow {
   font:
-    500 10px "DM Mono",
+    500 10px var(--font-code),
     monospace;
   letter-spacing: 1.3px;
   color: #9ca8bb;
@@ -520,7 +533,7 @@ body {
   flex-direction: column;
   justify-content: space-between;
   color: #b0b9c7;
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   height: 174px;
   padding-bottom: 2px;
   width: 40px;
@@ -670,7 +683,7 @@ body {
 .table-head {
   min-height: 30px;
   border-bottom: 1px solid var(--line);
-  font: 500 9px "DM Mono";
+  font: 500 9px var(--font-code);
   color: #a6b0c0;
   letter-spacing: 0.4px;
 }
@@ -702,17 +715,17 @@ body {
   display: block;
 }
 .server-name span {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #a0aabd;
   display: block;
   margin-top: 3px;
 }
 .protocol-tag {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #63718b;
 }
 .latency {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #3faf91;
 }
 .status-pill {
@@ -819,7 +832,7 @@ body {
   margin: 16px 0 6px;
 }
 .mono-url {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #a0aabd;
   margin: 0;
 }
@@ -854,7 +867,7 @@ body {
 .rules-heading {
   height: 42px;
   color: #a6b0c0;
-  font: 500 9px "DM Mono";
+  font: 500 9px var(--font-code);
   border-bottom: 1px solid var(--line);
 }
 .rule-row {
@@ -866,7 +879,7 @@ body {
   border-bottom: 0;
 }
 .rule-type {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #73819a;
 }
 .rule-row strong {
@@ -922,7 +935,7 @@ body {
   color: #8b75e5;
 }
 .group-type {
-  font: 9px "DM Mono";
+  font: 9px var(--font-code);
   color: #9ca7b7;
 }
 .group-card h3 {
@@ -982,7 +995,7 @@ body {
   justify-content: space-between;
   padding: 0 20px;
   color: #bdc7db;
-  font: 11px "DM Mono";
+  font: 11px var(--font-code);
 }
 .code-toolbar .text-button {
   color: #92aaff;
@@ -996,7 +1009,7 @@ body {
   margin-right: 7px;
 }
 .config-preview pre {
-  font: 12px/1.8 "DM Mono";
+  font: 12px/1.8 var(--font-code);
   color: #bec9dc;
   padding: 21px 25px;
   margin: 0;
@@ -1063,7 +1076,7 @@ body {
   align-items: center;
   justify-content: space-between;
   color: #79869b;
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
 }
 .copy-button {
   border: 0;
@@ -1487,7 +1500,7 @@ label select:focus {
 .access-key-header {
   height: 42px;
   border-bottom: 1px solid var(--line);
-  font: 500 9px "DM Mono";
+  font: 500 9px var(--font-code);
   color: #a6b0c0;
 }
 .access-key-row {
@@ -1511,7 +1524,7 @@ label select:focus {
   margin-bottom: 4px;
 }
 .key-value span {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #9da8b9;
 }
 .key-icon {
@@ -1562,7 +1575,7 @@ label select:focus {
 }
 .key-input input {
   flex: 1;
-  font: 11px "DM Mono";
+  font: 11px var(--font-code);
   background: #f8faff;
   color: #5670cb;
 }
@@ -1792,7 +1805,7 @@ label textarea:focus {
   font-size: 12px;
 }
 .provider-card span {
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
   color: #9aa6b7;
   white-space: nowrap;
   overflow: hidden;
@@ -1926,7 +1939,7 @@ body {
   stroke-linejoin: round;
 }
 .telemetry-badge {
-  font: 11px "DM Mono";
+  font: 11px var(--font-code);
   color: #8e9bae;
   background: #f3f5f9;
   border: 1px solid var(--line);
@@ -2021,7 +2034,7 @@ body {
   padding-top: 0;
 }
 .source-kicker {
-  font: 500 10px "DM Mono";
+  font: 500 10px var(--font-code);
   letter-spacing: 1.2px;
   color: #9ca8bb;
   margin: 0 0 6px;
@@ -2035,7 +2048,7 @@ body {
   border-radius: 12px;
   background: #edf1ff;
   color: #5d7de3;
-  font: 500 11px "DM Mono";
+  font: 500 11px var(--font-code);
 }
 .subscription-source .source-count {
   background: #f0edff;
@@ -2258,7 +2271,7 @@ body {
   margin: 0;
   text-align: right;
   color: #34425d;
-  font-family: "DM Mono";
+  font-family: var(--font-code);
   font-size: 10px;
   max-width: 55%;
   overflow: hidden;
@@ -2402,7 +2415,7 @@ body {
 .service-rule-count {
   white-space: nowrap;
   color: #7f8da4;
-  font: 10px "DM Mono";
+  font: 10px var(--font-code);
 }
 .service-rule-card > label {
   margin-bottom: 12px;
@@ -2552,7 +2565,7 @@ body {
   padding: 10px 12px;
   border-bottom: 1px solid var(--line);
   color: #9aa5b5;
-  font: 9px "DM Mono";
+  font: 9px var(--font-code);
 }
 .usage-history-list {
   max-height: 340px;
@@ -4325,3 +4338,23 @@ label textarea:focus {
 }
 
 .auth-brand > span { font-size: 26px; }
+
+/* Code and connection values retain a monospace face inside interface forms. */
+pre,
+code,
+kbd,
+samp,
+.mono-url,
+.protocol-tag,
+.share-url,
+.key-value span,
+.key-input input,
+input[name="manualKey"],
+input[name="credential"],
+input[name="address"],
+input[name="sni"],
+input[type="url"],
+#client-config-form textarea {
+  font-family: var(--font-code) !important;
+  font-variant-ligatures: none;
+}
