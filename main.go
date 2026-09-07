@@ -21,6 +21,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 	"unicode"
 
@@ -55,8 +56,9 @@ time.neu.edu.cn`
 var webAssets embed.FS
 
 type App struct {
-	db     *sql.DB
-	static http.Handler
+	db                   *sql.DB
+	static               http.Handler
+	publicSubscriptionMu sync.Mutex
 }
 
 type contextKey string
@@ -1750,6 +1752,57 @@ func (a *App) refreshSubscription(id int64) error {
 	return a.storeSubscriptionSnapshot(id, now, body, filtered, response.Header.Get("Subscription-Userinfo"))
 }
 
+func (a *App) usedSubscriptionIDs() []int64 {
+	subscriptions := a.listSubscriptions()
+	byID := make(map[int64]subscription, len(subscriptions))
+	byName := make(map[string]int64, len(subscriptions))
+	for _, item := range subscriptions {
+		if !item.Enabled {
+			continue
+		}
+		byID[item.ID] = item
+		byName[item.Name] = item.ID
+	}
+	used := map[int64]bool{}
+	for _, group := range a.listGroups() {
+		if !group.Enabled {
+			continue
+		}
+		for _, member := range group.Proxies {
+			var id int64
+			if strings.HasPrefix(member, "subscription-id:") {
+				id, _ = strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(member, "subscription-id:")), 10, 64)
+			} else if strings.HasPrefix(member, "subscription:") {
+				id = byName[strings.TrimSpace(strings.TrimPrefix(member, "subscription:"))]
+			}
+			if _, ok := byID[id]; ok {
+				used[id] = true
+			}
+		}
+	}
+	ids := make([]int64, 0, len(used))
+	for id := range used {
+		ids = append(ids, id)
+	}
+	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
+	return ids
+}
+
+func (a *App) refreshUsedSubscriptions() {
+	ids := a.usedSubscriptionIDs()
+	var wg sync.WaitGroup
+	for _, id := range ids {
+		wg.Add(1)
+		go func(subscriptionID int64) {
+			defer wg.Done()
+			if err := a.refreshSubscription(subscriptionID); err != nil {
+				log.Printf("on-demand subscription update %d failed: %v", subscriptionID, err)
+			}
+		}(id)
+	}
+	wg.Wait()
+}
+
 func (a *App) handleProxies(w http.ResponseWriter, r *http.Request) {
 	if r.Method == http.MethodGet {
 		writeJSON(w, 200, a.allProxies())
@@ -3106,6 +3159,12 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = a.db.Exec(`UPDATE access_keys SET last_used_at=? WHERE id=?`, now, id)
+	// A client refresh should be based on the latest snapshots from every
+	// subscription referenced by an enabled proxy group. Serialize batches to
+	// avoid a burst of client requests causing duplicate upstream refreshes.
+	a.publicSubscriptionMu.Lock()
+	a.refreshUsedSubscriptions()
+	a.publicSubscriptionMu.Unlock()
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	if monthlyDataGB > 0 {
 		nextMonth := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)
