@@ -36,7 +36,7 @@ function clearDemoContent() {
   $('.subscription-grid').innerHTML = '';
   $$('.rules-heading ~ .rule-row').forEach((row) => row.remove());
   $('.group-cards').innerHTML = '';
-  $('#view-rule-providers .empty-preview').innerHTML = '';
+  $('#rule-provider-list').innerHTML = '';
   $('.activity-list').innerHTML = [['01', 'subscriptions', 'Connect your sources', 'Import and update provider subscriptions.'], ['02', 'groups', 'Choose how traffic flows', 'Organize sources into proxy groups.'], ['03', 'access-keys', 'Bring it to your devices', 'Create a private subscription URL.']].map(([number, view, title, detail]) => `<button class="workflow-link" data-view-target="${view}"><span>${number}</span><div><strong>${title}</strong><small>${detail}</small></div><span aria-hidden="true">↗</span></button>`).join('');
   $$('.stat-card .stat-value').forEach((value) => { value.textContent = '—'; });
   $$('.stat-card .stat-meta').forEach((value) => { value.textContent = 'No data yet'; });
@@ -723,9 +723,10 @@ function renderGroups(items) {
 }
 
 function renderRuleProviders(items) {
-  const empty = $('#view-rule-providers .empty-preview');
+  const empty = $('#rule-provider-list');
   if (!empty) return;
   empty.classList.toggle('provider-list', items.length > 0);
+  empty.classList.toggle('empty-preview', items.length === 0);
   empty.innerHTML = items.length ? items.map((item) => `<div class="provider-card"><div class="source-logo cheap">⌁</div><div><strong>${escapeHTML(item.name)}</strong><span>${escapeHTML(item.type || 'http')} · ${escapeHTML(item.behavior || 'classical')} · ${escapeHTML(item.format || 'yaml')}</span><small>${escapeHTML(item.primaryUrl)} · ${item.lastError ? escapeHTML(item.lastError) : item.lastUpdateAt ? `Updated ${escapeHTML(item.lastUpdateAt)}` : `Every ${item.interval || 86400}s`}</small></div><button class="mini-button" data-provider-update="${item.id}">Update</button><span class="row-actions"><button class="icon-action" data-edit-provider="${item.id}" aria-label="Edit ${escapeHTML(item.name)}" title="Edit rule provider">${editIcon}</button><button class="icon-action danger" data-provider-delete="${item.id}" aria-label="Delete ${escapeHTML(item.name)}" title="Delete rule provider">${trashIcon}</button></span></div>`).join('') : '<div class="empty-icon">⌁</div><h3>Rule providers are ready to be configured</h3><p>Connect a list such as Loyalsoldier to keep routing rules current.</p><button class="button button-secondary" data-add-provider> Add your first provider </button>';
   $$('[data-edit-provider]').forEach((button) => button.addEventListener('click', () => openProviderModal(items.find((item) => String(item.id) === button.dataset.editProvider))));
   $$('[data-provider-update]').forEach((button) => button.addEventListener('click', async () => { try { await api(`/api/rule-providers/${button.dataset.providerUpdate}/update`, { method: 'POST' }); await refreshWorkspace(); showNotice('Rule provider updated', 'The rule list is cached locally.'); } catch (error) { alert(error.message); } }));

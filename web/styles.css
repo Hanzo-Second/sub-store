@@ -1804,7 +1804,7 @@ label textarea:focus {
 .provider-card strong {
   font-size: 12px;
 }
-.provider-card span {
+.provider-card > div:nth-child(2) > span {
   font: 10px var(--font-code);
   color: #9aa6b7;
   white-space: nowrap;
@@ -3813,7 +3813,7 @@ button:disabled {
 .provider-card > div:nth-child(2) {
   min-width: 0;
 }
-.provider-card span {
+.provider-card > div:nth-child(2) > span {
   max-width: 100%;
 }
 label {
@@ -4357,4 +4357,48 @@ input[type="url"],
 #client-config-form textarea {
   font-family: var(--font-code) !important;
   font-variant-ligatures: none;
+}
+
+/* Populated provider lists stretch their rows; centering belongs to empty states. */
+.provider-list {
+  align-items: stretch;
+  justify-content: flex-start;
+  overflow: hidden;
+}
+.provider-list .provider-card {
+  display: grid;
+  grid-template-columns: 38px minmax(0, 1fr) auto 70px;
+  width: 100%;
+  gap: 16px;
+  padding: 20px 24px;
+}
+.provider-card strong {
+  font-size: 14px;
+}
+.provider-card small {
+  overflow-wrap: anywhere;
+  color: #72816c;
+  font-size: 11px;
+  line-height: 1.6;
+}
+.provider-card .row-actions {
+  overflow: visible;
+  justify-content: flex-end;
+}
+@media (max-width: 720px) {
+  .provider-list .provider-card {
+    grid-template-columns: 38px minmax(0, 1fr) 70px;
+    gap: 12px;
+    padding: 18px;
+  }
+  .provider-card > div:nth-child(2) {
+    grid-column: 2 / -1;
+  }
+  .provider-card > .mini-button {
+    grid-column: 2;
+    justify-self: end;
+  }
+  .provider-card > .row-actions {
+    grid-column: 3;
+  }
 }
