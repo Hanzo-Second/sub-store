@@ -3129,9 +3129,8 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	var enabled int
-	var name string
 	var monthlyDataGB float64
-	err := a.db.QueryRow(`SELECT id,name,enabled,monthly_data_gb FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &name, &enabled, &monthlyDataGB)
+	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &enabled, &monthlyDataGB)
 	if err != nil || enabled != 1 {
 		http.NotFound(w, r)
 		return
@@ -3145,11 +3144,8 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	a.refreshAllSubscriptions()
 	a.publicSubscriptionMu.Unlock()
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
-	name = strings.TrimSpace(name)
-	if name != "" {
-		w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte(name)))
-		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name + ".yaml"}))
-	}
+	w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte("sub-store")))
+	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": "sub-store"}))
 	if monthlyDataGB > 0 {
 		nextMonth := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		totalBytes := uint64(monthlyDataGB * float64(1024*1024*1024))

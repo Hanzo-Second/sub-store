@@ -329,7 +329,7 @@ func TestSubscriptionPathAndUsageAreManagedAutomatically(t *testing.T) {
 	}
 }
 
-func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
+func TestAccessKeyPublishesMonthlyAllowanceAndSubStoreName(t *testing.T) {
 	app := testApp(t)
 	key := "monthly-test-key"
 	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,monthly_data_gb,created_at) VALUES(?,?,?,?,1,?,?)`, "家用 Laptop", hashToken(key), key, "mo••ey", 25.5, time.Now().UTC().Format(time.RFC3339)); err != nil {
@@ -349,11 +349,11 @@ func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
 	profileTitle := recorder.Header().Get("Profile-Title")
 	encodedTitle := strings.TrimPrefix(profileTitle, "base64:")
 	decodedTitle, err := base64.StdEncoding.DecodeString(encodedTitle)
-	if err != nil || string(decodedTitle) != "家用 Laptop" {
+	if err != nil || string(decodedTitle) != "sub-store" {
 		t.Fatalf("unexpected profile title header %q", profileTitle)
 	}
 	disposition, params, err := mime.ParseMediaType(recorder.Header().Get("Content-Disposition"))
-	if err != nil || disposition != "inline" || params["filename"] != "家用 Laptop.yaml" {
+	if err != nil || disposition != "inline" || params["filename"] != "sub-store" {
 		t.Fatalf("unexpected content disposition %q", recorder.Header().Get("Content-Disposition"))
 	}
 }
