@@ -380,7 +380,6 @@ document.addEventListener('submit', async (event) => {
   event.preventDefault();
   event.stopImmediatePropagation();
   const data = Object.fromEntries(new FormData(event.target));
-  const monthlyDataGB = Number(event.target.elements.monthlyDataGB.value || 0);
   const id = event.target.dataset.editId;
   try { await api(id ? `/api/proxies/${id}` : '/api/proxies', { method: id ? 'PATCH' : 'POST', body: JSON.stringify({ ...data, port: Number(data.port), skipVerify: data.skipVerify === 'on', enabled: true }) }); closeModal(); await refreshWorkspace(); selectView('proxies'); showToast(); } catch (error) { alert(error.message); }
 }, true);
@@ -393,12 +392,12 @@ document.addEventListener('submit', async (event) => {
   const id = event.target.dataset.editId;
   if (id) {
     const key = data.replaceKey === 'on' ? ($('.key-mode.active').dataset.keyMode === 'manual' ? data.manualKey : data.generatedKey) : undefined;
-    try { const result = await api(`/api/access-keys/${id}`, { method: 'PATCH', body: JSON.stringify({ name: data.keyName, enabled: data.enabled === 'on', monthlyDataGB, usageSubscriptionId: Number(data.usageSubscriptionId || 0), ...(key ? { key } : {}) }) }); closeAccessModal(); await refreshWorkspace(); if (result.key) showAccessKeyResult(result.key, 'Replacement key ready'); else { showToast(); $('.toast strong').textContent = 'Access key updated'; $('.toast p').textContent = 'The access key changes are saved.'; } } catch (error) { alert(error.message); }
+    try { const result = await api(`/api/access-keys/${id}`, { method: 'PATCH', body: JSON.stringify({ name: data.keyName, enabled: data.enabled === 'on', monthlyDataGB: Number(event.target.elements.monthlyDataGB.value || 0), usageSubscriptionId: Number(data.usageSubscriptionId || 0), ...(key ? { key } : {}) }) }); closeAccessModal(); await refreshWorkspace(); if (result.key) showAccessKeyResult(result.key, 'Replacement key ready'); else { showToast(); $('.toast strong').textContent = 'Access key updated'; $('.toast p').textContent = 'The access key changes are saved.'; } } catch (error) { alert(error.message); }
     return;
   }
   const manual = $('.key-mode.active').dataset.keyMode === 'manual';
   const key = manual ? data.manualKey : data.generatedKey;
-  try { const result = await api('/api/access-keys', { method: 'POST', body: JSON.stringify({ name: data.keyName, key, monthlyDataGB, usageSubscriptionId: Number(data.usageSubscriptionId || 0) }) }); closeAccessModal(); await refreshWorkspace(); showAccessKeyResult(result.key, 'Access key ready'); } catch (error) { alert(error.message); }
+  try { const result = await api('/api/access-keys', { method: 'POST', body: JSON.stringify({ name: data.keyName, key, monthlyDataGB: Number(event.target.elements.monthlyDataGB.value || 0), usageSubscriptionId: Number(data.usageSubscriptionId || 0) }) }); closeAccessModal(); await refreshWorkspace(); showAccessKeyResult(result.key, 'Access key ready'); } catch (error) { alert(error.message); }
 }, true);
 
 $('#save-settings').addEventListener('click', async () => {
