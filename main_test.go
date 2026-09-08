@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -359,8 +360,27 @@ func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
 
 func TestPublicSubscriptionRefreshesEveryEnabledSubscriptionBeforeGeneration(t *testing.T) {
 	app := testApp(t)
+	app.db.SetMaxOpenConns(1)
 	var firstRequests, secondRequests, disabledRequests atomic.Int32
+	var activeRequests, maximumActiveRequests atomic.Int32
+	var releaseRequests sync.Once
+	bothRequestsStarted := make(chan struct{})
 	app.subscriptionClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		active := activeRequests.Add(1)
+		defer activeRequests.Add(-1)
+		for {
+			maximum := maximumActiveRequests.Load()
+			if active <= maximum || maximumActiveRequests.CompareAndSwap(maximum, active) {
+				break
+			}
+		}
+		if active == 2 {
+			releaseRequests.Do(func() { close(bothRequestsStarted) })
+		}
+		select {
+		case <-bothRequestsStarted:
+		case <-time.After(time.Second):
+		}
 		var name string
 		switch request.URL.Path {
 		case "/first":
@@ -406,6 +426,9 @@ func TestPublicSubscriptionRefreshesEveryEnabledSubscriptionBeforeGeneration(t *
 	}
 	if disabledRequests.Load() != 0 {
 		t.Fatalf("disabled subscription was refreshed %d times", disabledRequests.Load())
+	}
+	if maximumActiveRequests.Load() < 2 {
+		t.Fatalf("enabled subscriptions were refreshed sequentially; maximum concurrent requests=%d", maximumActiveRequests.Load())
 	}
 	config := recorder.Body.String()
 	for _, name := range []string{"First / fresh-one", "Second / fresh-two"} {

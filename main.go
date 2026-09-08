@@ -1765,14 +1765,20 @@ func (a *App) refreshSubscription(id int64) error {
 
 func (a *App) refreshAllSubscriptions() {
 	items := a.listSubscriptions()
+	var updates sync.WaitGroup
 	for _, item := range items {
 		if !item.Enabled {
 			continue
 		}
-		if err := a.refreshSubscription(item.ID); err != nil {
-			log.Printf("on-demand subscription update %d failed: %v", item.ID, err)
-		}
+		updates.Add(1)
+		go func(id int64) {
+			defer updates.Done()
+			if err := a.refreshSubscription(id); err != nil {
+				log.Printf("on-demand subscription update %d failed: %v", id, err)
+			}
+		}(item.ID)
 	}
+	updates.Wait()
 }
 
 func (a *App) handleProxies(w http.ResponseWriter, r *http.Request) {
