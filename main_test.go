@@ -3,21 +3,31 @@ package main
 import (
 	"context"
 	"database/sql"
+	"encoding/base64"
 	"encoding/json"
 	"fmt"
+	"io"
 	"io/fs"
 	"math"
+	"mime"
 	"net/http"
 	"net/http/httptest"
 	"path/filepath"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
 	"gopkg.in/yaml.v3"
 	_ "modernc.org/sqlite"
 )
+
+type roundTripFunc func(*http.Request) (*http.Response, error)
+
+func (fn roundTripFunc) RoundTrip(request *http.Request) (*http.Response, error) {
+	return fn(request)
+}
 
 func testApp(t *testing.T) *App {
 	t.Helper()
@@ -321,7 +331,7 @@ func TestSubscriptionPathAndUsageAreManagedAutomatically(t *testing.T) {
 func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
 	app := testApp(t)
 	key := "monthly-test-key"
-	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,monthly_data_gb,created_at) VALUES(?,?,?,?,1,?,?)`, "Laptop", hashToken(key), key, "mo••ey", 25.5, time.Now().UTC().Format(time.RFC3339)); err != nil {
+	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,monthly_data_gb,created_at) VALUES(?,?,?,?,1,?,?)`, "家用 Laptop", hashToken(key), key, "mo••ey", 25.5, time.Now().UTC().Format(time.RFC3339)); err != nil {
 		t.Fatal(err)
 	}
 	request := httptest.NewRequest(http.MethodGet, "/sub/"+key, nil)
@@ -334,6 +344,77 @@ func TestAccessKeyPublishesSeparateMonthlyAllowance(t *testing.T) {
 	usage := parseSubscriptionUserInfo(header)
 	if !usage.HasTotal || math.Abs(usage.TotalGB-25.5) > 0.0001 {
 		t.Fatalf("unexpected per-key allowance header %q", header)
+	}
+	profileTitle := recorder.Header().Get("Profile-Title")
+	encodedTitle := strings.TrimPrefix(profileTitle, "base64:")
+	decodedTitle, err := base64.StdEncoding.DecodeString(encodedTitle)
+	if err != nil || string(decodedTitle) != "家用 Laptop" {
+		t.Fatalf("unexpected profile title header %q", profileTitle)
+	}
+	disposition, params, err := mime.ParseMediaType(recorder.Header().Get("Content-Disposition"))
+	if err != nil || disposition != "inline" || params["filename"] != "家用 Laptop.yaml" {
+		t.Fatalf("unexpected content disposition %q", recorder.Header().Get("Content-Disposition"))
+	}
+}
+
+func TestPublicSubscriptionRefreshesEveryEnabledSubscriptionBeforeGeneration(t *testing.T) {
+	app := testApp(t)
+	var firstRequests, secondRequests, disabledRequests atomic.Int32
+	app.subscriptionClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		var name string
+		switch request.URL.Path {
+		case "/first":
+			firstRequests.Add(1)
+			name = "fresh-one"
+		case "/second":
+			secondRequests.Add(1)
+			name = "fresh-two"
+		case "/disabled":
+			disabledRequests.Add(1)
+			name = "disabled"
+		default:
+			return &http.Response{StatusCode: http.StatusNotFound, Body: io.NopCloser(strings.NewReader("not found")), Header: make(http.Header)}, nil
+		}
+		body := fmt.Sprintf("proxies:\n  - name: %s\n    type: ss\n    server: %s.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n", name, name)
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: make(http.Header)}, nil
+	})}
+
+	oldSnapshot := "proxies:\n  - name: stale\n    type: ss\n    server: stale.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n"
+	firstResult, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,raw_content,created_at) VALUES('First',?,'clash-meta',1,?,'now')`, "https://provider.example/first", oldSnapshot)
+	if err != nil {
+		t.Fatal(err)
+	}
+	firstID, _ := firstResult.LastInsertId()
+	if _, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,raw_content,created_at) VALUES('Second',?,'clash-meta',1,?,'now'),('Disabled',?,'clash-meta',0,?,'now')`, "https://provider.example/second", oldSnapshot, "https://provider.example/disabled", oldSnapshot); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Only First','select',?,1,'now')`, fmt.Sprintf(`["subscription-id:%d"]`, firstID)); err != nil {
+		t.Fatal(err)
+	}
+	key := "refresh-all-test-key"
+	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,created_at) VALUES('Refresh all',?,?,?,1,'now')`, hashToken(key), key, "re••ey"); err != nil {
+		t.Fatal(err)
+	}
+
+	recorder := httptest.NewRecorder()
+	app.handlePublicSubscription(recorder, httptest.NewRequest(http.MethodGet, "/sub/"+key, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscription returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	if firstRequests.Load() != 1 || secondRequests.Load() != 1 {
+		t.Fatalf("enabled subscriptions were not all refreshed: first=%d second=%d", firstRequests.Load(), secondRequests.Load())
+	}
+	if disabledRequests.Load() != 0 {
+		t.Fatalf("disabled subscription was refreshed %d times", disabledRequests.Load())
+	}
+	config := recorder.Body.String()
+	for _, name := range []string{"First / fresh-one", "Second / fresh-two"} {
+		if !strings.Contains(config, name) {
+			t.Fatalf("generated configuration does not contain refreshed proxy %q", name)
+		}
+	}
+	if strings.Contains(config, " / stale") {
+		t.Fatal("generated configuration used a stale subscription snapshot")
 	}
 }
 

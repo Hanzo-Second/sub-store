@@ -13,6 +13,7 @@ import (
 	"io"
 	"io/fs"
 	"log"
+	"mime"
 	"net/http"
 	"net/url"
 	"os"
@@ -58,6 +59,7 @@ var webAssets embed.FS
 type App struct {
 	db                   *sql.DB
 	static               http.Handler
+	subscriptionClient   *http.Client
 	publicSubscriptionMu sync.Mutex
 }
 
@@ -1430,7 +1432,10 @@ func (a *App) updateSubscription(w http.ResponseWriter, id int64) {
 		return
 	}
 	now := time.Now().UTC().Format(time.RFC3339)
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := a.subscriptionClient
+	if client == nil {
+		client = &http.Client{Timeout: 25 * time.Second}
+	}
 	req, _ := http.NewRequest(http.MethodGet, item.URL, nil)
 	req.Header.Set("User-Agent", item.UserAgent)
 	response, err := client.Do(req)
@@ -1688,7 +1693,10 @@ func (a *App) collectSubscriptionUsage() {
 		}
 	}
 	rows.Close()
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := a.subscriptionClient
+	if client == nil {
+		client = &http.Client{Timeout: 25 * time.Second}
+	}
 	for _, item := range sources {
 		now := time.Now().UTC().Format(time.RFC3339)
 		due, claimErr := a.claimUsageCollection(item.url, now)
@@ -1727,7 +1735,10 @@ func (a *App) refreshSubscription(id int64) error {
 	}
 	normalizeSubscription(&item)
 	now := time.Now().UTC().Format(time.RFC3339)
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := a.subscriptionClient
+	if client == nil {
+		client = &http.Client{Timeout: 25 * time.Second}
+	}
 	req, err := http.NewRequest(http.MethodGet, item.URL, nil)
 	if err != nil {
 		return err
@@ -1752,55 +1763,16 @@ func (a *App) refreshSubscription(id int64) error {
 	return a.storeSubscriptionSnapshot(id, now, body, filtered, response.Header.Get("Subscription-Userinfo"))
 }
 
-func (a *App) usedSubscriptionIDs() []int64 {
-	subscriptions := a.listSubscriptions()
-	byID := make(map[int64]subscription, len(subscriptions))
-	byName := make(map[string]int64, len(subscriptions))
-	for _, item := range subscriptions {
+func (a *App) refreshAllSubscriptions() {
+	items := a.listSubscriptions()
+	for _, item := range items {
 		if !item.Enabled {
 			continue
 		}
-		byID[item.ID] = item
-		byName[item.Name] = item.ID
-	}
-	used := map[int64]bool{}
-	for _, group := range a.listGroups() {
-		if !group.Enabled {
-			continue
-		}
-		for _, member := range group.Proxies {
-			var id int64
-			if strings.HasPrefix(member, "subscription-id:") {
-				id, _ = strconv.ParseInt(strings.TrimSpace(strings.TrimPrefix(member, "subscription-id:")), 10, 64)
-			} else if strings.HasPrefix(member, "subscription:") {
-				id = byName[strings.TrimSpace(strings.TrimPrefix(member, "subscription:"))]
-			}
-			if _, ok := byID[id]; ok {
-				used[id] = true
-			}
+		if err := a.refreshSubscription(item.ID); err != nil {
+			log.Printf("on-demand subscription update %d failed: %v", item.ID, err)
 		}
 	}
-	ids := make([]int64, 0, len(used))
-	for id := range used {
-		ids = append(ids, id)
-	}
-	sort.Slice(ids, func(i, j int) bool { return ids[i] < ids[j] })
-	return ids
-}
-
-func (a *App) refreshUsedSubscriptions() {
-	ids := a.usedSubscriptionIDs()
-	var wg sync.WaitGroup
-	for _, id := range ids {
-		wg.Add(1)
-		go func(subscriptionID int64) {
-			defer wg.Done()
-			if err := a.refreshSubscription(subscriptionID); err != nil {
-				log.Printf("on-demand subscription update %d failed: %v", subscriptionID, err)
-			}
-		}(id)
-	}
-	wg.Wait()
 }
 
 func (a *App) handleProxies(w http.ResponseWriter, r *http.Request) {
@@ -3151,8 +3123,9 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	}
 	var id int64
 	var enabled int
+	var name string
 	var monthlyDataGB float64
-	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &enabled, &monthlyDataGB)
+	err := a.db.QueryRow(`SELECT id,name,enabled,monthly_data_gb FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &name, &enabled, &monthlyDataGB)
 	if err != nil || enabled != 1 {
 		http.NotFound(w, r)
 		return
@@ -3160,12 +3133,17 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	now := time.Now().UTC().Format(time.RFC3339)
 	_, _ = a.db.Exec(`UPDATE access_keys SET last_used_at=? WHERE id=?`, now, id)
 	// A client refresh should be based on the latest snapshots from every
-	// subscription referenced by an enabled proxy group. Serialize batches to
-	// avoid a burst of client requests causing duplicate upstream refreshes.
+	// enabled subscription. Serialize batches to avoid a burst of client
+	// requests causing duplicate upstream refreshes.
 	a.publicSubscriptionMu.Lock()
-	a.refreshUsedSubscriptions()
+	a.refreshAllSubscriptions()
 	a.publicSubscriptionMu.Unlock()
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
+	name = strings.TrimSpace(name)
+	if name != "" {
+		w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte(name)))
+		w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": name + ".yaml"}))
+	}
 	if monthlyDataGB > 0 {
 		nextMonth := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)
 		totalBytes := uint64(monthlyDataGB * float64(1024*1024*1024))
