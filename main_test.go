@@ -358,6 +358,44 @@ func TestAccessKeyPublishesMonthlyAllowanceAndSubStoreName(t *testing.T) {
 	}
 }
 
+func TestAccessKeyPublishesSelectedSubscriptionUsage(t *testing.T) {
+	app := testApp(t)
+	expiresAt := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)
+	const gib = uint64(1024 * 1024 * 1024)
+	app.subscriptionClient = &http.Client{Transport: roundTripFunc(func(request *http.Request) (*http.Response, error) {
+		header := make(http.Header)
+		header.Set("Subscription-Userinfo", fmt.Sprintf("upload=%d; download=%d; total=%d; expire=%d", gib, 2*gib, 10*gib, expiresAt.Unix()))
+		body := "proxies:\n  - name: fresh\n    type: ss\n    server: fresh.example.com\n    port: 443\n    cipher: aes-128-gcm\n    password: secret\n"
+		return &http.Response{StatusCode: http.StatusOK, Body: io.NopCloser(strings.NewReader(body)), Header: header}, nil
+	})}
+	result, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,created_at) VALUES('Selected usage','https://provider.example/selected','clash-meta',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	subscriptionID, _ := result.LastInsertId()
+	key := "selected-usage-key"
+	createBody := fmt.Sprintf(`{"name":"Selected","key":%q,"monthlyDataGB":99,"usageSubscriptionId":%d}`, key, subscriptionID)
+	createRecorder := httptest.NewRecorder()
+	app.handleAccessKeys(createRecorder, httptest.NewRequest(http.MethodPost, "/api/access-keys", strings.NewReader(createBody)))
+	if createRecorder.Code != http.StatusCreated {
+		t.Fatalf("access key create returned %d: %s", createRecorder.Code, createRecorder.Body.String())
+	}
+
+	recorder := httptest.NewRecorder()
+	app.handlePublicSubscription(recorder, httptest.NewRequest(http.MethodGet, "/sub/"+key, nil))
+	if recorder.Code != http.StatusOK {
+		t.Fatalf("subscription returned %d: %s", recorder.Code, recorder.Body.String())
+	}
+	usage := parseSubscriptionUserInfo(recorder.Header().Get("Subscription-Userinfo"))
+	if math.Abs(usage.UsedGB-3) > 0.0001 || math.Abs(usage.TotalGB-10) > 0.0001 || usage.ExpireAt != expiresAt.Format(time.RFC3339) {
+		t.Fatalf("selected subscription usage was not published: %+v", usage)
+	}
+	keys := app.listAccessKeys()
+	if len(keys) != 1 || keys[0].UsageSubscriptionID != subscriptionID || keys[0].UsageSubscriptionName != "Selected usage" {
+		t.Fatalf("usage subscription selection was not returned: %+v", keys)
+	}
+}
+
 func TestPublicSubscriptionRefreshesEveryEnabledSubscriptionBeforeGeneration(t *testing.T) {
 	app := testApp(t)
 	app.db.SetMaxOpenConns(1)

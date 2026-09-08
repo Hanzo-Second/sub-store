@@ -502,7 +502,7 @@
             <div class="panel full-table-panel">
               <div class="access-key-header">
                 <span>KEY</span><span>TYPE</span><span>STATUS</span
-                ><span>MONTHLY DATA</span><span>LAST USED</span><span></span>
+                ><span>USAGE</span><span>LAST USED</span><span></span>
               </div>
               <div id="access-key-rows"></div>
             </div>
@@ -915,6 +915,14 @@
               placeholder="e.g. Laptop"
               required /></label
           ><label
+            >Usage shown in clients<select name="usageSubscriptionId">
+              <option value="0">Manual monthly allowance</option>
+            </select
+            ><span class="field-hint"
+              >Choose which subscription supplies used data, total allowance,
+              and expiry to Clash clients.</span
+            ></label
+          ><label
             >Monthly data allowance (GB)<input
               name="monthlyDataGB"
               type="number"
@@ -923,8 +931,8 @@
               value="0"
               required
             /><span class="field-hint"
-              >Use 0 for unlimited. This allowance is published to Clash; proxy
-              traffic cannot be measured or enforced by SubStore.</span
+              >Used only when Manual monthly allowance is selected. Use 0 for
+              unlimited; SubStore does not enforce this limit.</span
             ></label
           >
           <div class="generated-key-field" id="generated-key-field">

@@ -196,14 +196,16 @@ type ruleProvider struct {
 }
 
 type accessKey struct {
-	ID            int64   `json:"id"`
-	Name          string  `json:"name"`
-	Key           string  `json:"key,omitempty"`
-	KeyPreview    string  `json:"keyPreview"`
-	Enabled       bool    `json:"enabled"`
-	MonthlyDataGB float64 `json:"monthlyDataGB"`
-	LastUsedAt    string  `json:"lastUsedAt"`
-	CreatedAt     string  `json:"createdAt"`
+	ID                    int64   `json:"id"`
+	Name                  string  `json:"name"`
+	Key                   string  `json:"key,omitempty"`
+	KeyPreview            string  `json:"keyPreview"`
+	Enabled               bool    `json:"enabled"`
+	MonthlyDataGB         float64 `json:"monthlyDataGB"`
+	UsageSubscriptionID   int64   `json:"usageSubscriptionId"`
+	UsageSubscriptionName string  `json:"usageSubscriptionName"`
+	LastUsedAt            string  `json:"lastUsedAt"`
+	CreatedAt             string  `json:"createdAt"`
 }
 
 type proxyGroup struct {
@@ -307,7 +309,7 @@ CREATE TABLE IF NOT EXISTS proxies (id INTEGER PRIMARY KEY AUTOINCREMENT, name T
 CREATE TABLE IF NOT EXISTS rules (id INTEGER PRIMARY KEY AUTOINCREMENT, rule_type TEXT NOT NULL, match_value TEXT NOT NULL, target TEXT NOT NULL, target_group_id INTEGER, priority INTEGER NOT NULL DEFAULT 100, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS service_rule_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL UNIQUE, rules_json TEXT NOT NULL DEFAULT '[]', target_group_id INTEGER NOT NULL, priority INTEGER NOT NULL DEFAULT 55, enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS rule_providers (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, provider_type TEXT NOT NULL DEFAULT 'http', behavior TEXT NOT NULL DEFAULT 'classical', provider_format TEXT NOT NULL DEFAULT 'yaml', primary_url TEXT NOT NULL, backup_url TEXT, path TEXT NOT NULL DEFAULT '', enabled INTEGER NOT NULL DEFAULT 1, update_mode TEXT NOT NULL DEFAULT 'manual', interval_minutes INTEGER NOT NULL DEFAULT 86400, last_update_at TEXT, last_error TEXT, content TEXT, created_at TEXT NOT NULL);
-CREATE TABLE IF NOT EXISTS access_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_value TEXT NOT NULL DEFAULT '', key_preview TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, monthly_data_gb REAL NOT NULL DEFAULT 0, last_used_at TEXT, created_at TEXT NOT NULL);
+CREATE TABLE IF NOT EXISTS access_keys (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, key_hash TEXT NOT NULL UNIQUE, key_value TEXT NOT NULL DEFAULT '', key_preview TEXT NOT NULL, enabled INTEGER NOT NULL DEFAULT 1, monthly_data_gb REAL NOT NULL DEFAULT 0, usage_subscription_id INTEGER, last_used_at TEXT, created_at TEXT NOT NULL, FOREIGN KEY(usage_subscription_id) REFERENCES subscriptions(id) ON DELETE SET NULL);
 CREATE TABLE IF NOT EXISTS proxy_groups (id INTEGER PRIMARY KEY AUTOINCREMENT, name TEXT NOT NULL, group_type TEXT NOT NULL, proxies_json TEXT NOT NULL DEFAULT '[]', enabled INTEGER NOT NULL DEFAULT 1, created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscription_usage_sources (id INTEGER PRIMARY KEY AUTOINCREMENT, url_hash TEXT NOT NULL UNIQUE, last_attempt_at TEXT NOT NULL DEFAULT '', last_collected_at TEXT NOT NULL DEFAULT '', last_used_gb REAL NOT NULL DEFAULT 0, last_total_gb REAL NOT NULL DEFAULT 0, last_expire_at TEXT NOT NULL DEFAULT '', created_at TEXT NOT NULL);
 CREATE TABLE IF NOT EXISTS subscription_usage_samples (id INTEGER PRIMARY KEY AUTOINCREMENT, source_id INTEGER NOT NULL, collected_at TEXT NOT NULL, used_gb REAL NOT NULL, total_gb REAL NOT NULL DEFAULT 0, delta_gb REAL NOT NULL DEFAULT 0, expire_at TEXT NOT NULL DEFAULT '', event TEXT NOT NULL DEFAULT 'normal', FOREIGN KEY(source_id) REFERENCES subscription_usage_sources(id) ON DELETE CASCADE);
@@ -347,6 +349,11 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 		}
 	}
 	for _, column := range []string{"monthly_data_gb REAL NOT NULL DEFAULT 0"} {
+		if _, alterErr := a.db.Exec(`ALTER TABLE access_keys ADD COLUMN ` + column); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
+			return alterErr
+		}
+	}
+	for _, column := range []string{"usage_subscription_id INTEGER REFERENCES subscriptions(id) ON DELETE SET NULL"} {
 		if _, alterErr := a.db.Exec(`ALTER TABLE access_keys ADD COLUMN ` + column); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
 		}
@@ -1384,7 +1391,18 @@ func (a *App) handleSubscriptionAction(w http.ResponseWriter, r *http.Request) {
 			writeDependencyConflict(w, "subscription", name, dependencies)
 			return
 		}
-		_, err := a.db.Exec(`DELETE FROM subscriptions WHERE id=?`, id)
+		tx, err := a.db.Begin()
+		if err == nil {
+			_, err = tx.Exec(`UPDATE access_keys SET usage_subscription_id=NULL WHERE usage_subscription_id=?`, id)
+		}
+		if err == nil {
+			_, err = tx.Exec(`DELETE FROM subscriptions WHERE id=?`, id)
+		}
+		if err == nil {
+			err = tx.Commit()
+		} else if tx != nil {
+			_ = tx.Rollback()
+		}
 		if err != nil {
 			writeError(w, 500, err.Error())
 			return
@@ -2675,12 +2693,17 @@ func (a *App) handleAccessKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	var input struct {
-		Name          string  `json:"name"`
-		Key           string  `json:"key"`
-		MonthlyDataGB float64 `json:"monthlyDataGB"`
+		Name                string  `json:"name"`
+		Key                 string  `json:"key"`
+		MonthlyDataGB       float64 `json:"monthlyDataGB"`
+		UsageSubscriptionID int64   `json:"usageSubscriptionId"`
 	}
 	if !decodeJSON(w, r, &input) || strings.TrimSpace(input.Name) == "" || input.MonthlyDataGB < 0 {
 		writeError(w, 400, "Key name and a non-negative monthly data allowance are required")
+		return
+	}
+	if !a.validUsageSubscription(input.UsageSubscriptionID) {
+		writeError(w, http.StatusBadRequest, "Usage subscription not found")
 		return
 	}
 	if input.Key == "" {
@@ -2691,16 +2714,25 @@ func (a *App) handleAccessKeys(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	preview := input.Key[:2] + "••••" + input.Key[len(input.Key)-2:]
-	result, err := a.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,monthly_data_gb,created_at) VALUES(?,?,?,?,?,?)`, input.Name, hashToken(input.Key), input.Key, preview, input.MonthlyDataGB, time.Now().UTC().Format(time.RFC3339))
+	result, err := a.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,monthly_data_gb,usage_subscription_id,created_at) VALUES(?,?,?,?,?,NULLIF(?,0),?)`, input.Name, hashToken(input.Key), input.Key, preview, input.MonthlyDataGB, input.UsageSubscriptionID, time.Now().UTC().Format(time.RFC3339))
 	if err != nil {
 		writeError(w, 400, "Key already exists")
 		return
 	}
 	id, _ := result.LastInsertId()
-	writeJSON(w, 201, accessKey{ID: id, Name: input.Name, Key: input.Key, KeyPreview: preview, Enabled: true, MonthlyDataGB: input.MonthlyDataGB})
+	writeJSON(w, 201, accessKey{ID: id, Name: input.Name, Key: input.Key, KeyPreview: preview, Enabled: true, MonthlyDataGB: input.MonthlyDataGB, UsageSubscriptionID: input.UsageSubscriptionID})
 }
+
+func (a *App) validUsageSubscription(id int64) bool {
+	if id == 0 {
+		return true
+	}
+	var count int
+	return a.db.QueryRow(`SELECT COUNT(*) FROM subscriptions WHERE id=?`, id).Scan(&count) == nil && count == 1
+}
+
 func (a *App) listAccessKeys() []accessKey {
-	rows, err := a.db.Query(`SELECT id,name,key_value,key_preview,enabled,monthly_data_gb,COALESCE(last_used_at,''),created_at FROM access_keys ORDER BY id DESC`)
+	rows, err := a.db.Query(`SELECT k.id,k.name,k.key_value,k.key_preview,k.enabled,k.monthly_data_gb,COALESCE(k.usage_subscription_id,0),COALESCE(s.name,''),COALESCE(k.last_used_at,''),k.created_at FROM access_keys k LEFT JOIN subscriptions s ON s.id=k.usage_subscription_id ORDER BY k.id DESC`)
 	if err != nil {
 		return []accessKey{}
 	}
@@ -2709,7 +2741,7 @@ func (a *App) listAccessKeys() []accessKey {
 	for rows.Next() {
 		var x accessKey
 		var enabled int
-		_ = rows.Scan(&x.ID, &x.Name, &x.Key, &x.KeyPreview, &enabled, &x.MonthlyDataGB, &x.LastUsedAt, &x.CreatedAt)
+		_ = rows.Scan(&x.ID, &x.Name, &x.Key, &x.KeyPreview, &enabled, &x.MonthlyDataGB, &x.UsageSubscriptionID, &x.UsageSubscriptionName, &x.LastUsedAt, &x.CreatedAt)
 		x.Enabled = enabled == 1
 		result = append(result, x)
 	}
@@ -2732,13 +2764,18 @@ func (a *App) handleAccessKeyAction(w http.ResponseWriter, r *http.Request) {
 	}
 	if r.Method == http.MethodPatch {
 		var input struct {
-			Name          string  `json:"name"`
-			Enabled       bool    `json:"enabled"`
-			Key           string  `json:"key"`
-			MonthlyDataGB float64 `json:"monthlyDataGB"`
+			Name                string  `json:"name"`
+			Enabled             bool    `json:"enabled"`
+			Key                 string  `json:"key"`
+			MonthlyDataGB       float64 `json:"monthlyDataGB"`
+			UsageSubscriptionID int64   `json:"usageSubscriptionId"`
 		}
 		if !decodeJSON(w, r, &input) || strings.TrimSpace(input.Name) == "" || input.MonthlyDataGB < 0 {
 			writeError(w, http.StatusBadRequest, "Key name and a non-negative monthly data allowance are required")
+			return
+		}
+		if !a.validUsageSubscription(input.UsageSubscriptionID) {
+			writeError(w, http.StatusBadRequest, "Usage subscription not found")
 			return
 		}
 		var err error
@@ -2748,9 +2785,9 @@ func (a *App) handleAccessKeyAction(w http.ResponseWriter, r *http.Request) {
 				return
 			}
 			preview := input.Key[:2] + "••••" + input.Key[len(input.Key)-2:]
-			_, err = a.db.Exec(`UPDATE access_keys SET name=?,key_hash=?,key_value=?,key_preview=?,enabled=?,monthly_data_gb=? WHERE id=?`, strings.TrimSpace(input.Name), hashToken(input.Key), input.Key, preview, boolInt(input.Enabled), input.MonthlyDataGB, id)
+			_, err = a.db.Exec(`UPDATE access_keys SET name=?,key_hash=?,key_value=?,key_preview=?,enabled=?,monthly_data_gb=?,usage_subscription_id=NULLIF(?,0) WHERE id=?`, strings.TrimSpace(input.Name), hashToken(input.Key), input.Key, preview, boolInt(input.Enabled), input.MonthlyDataGB, input.UsageSubscriptionID, id)
 		} else {
-			_, err = a.db.Exec(`UPDATE access_keys SET name=?,enabled=?,monthly_data_gb=? WHERE id=?`, strings.TrimSpace(input.Name), boolInt(input.Enabled), input.MonthlyDataGB, id)
+			_, err = a.db.Exec(`UPDATE access_keys SET name=?,enabled=?,monthly_data_gb=?,usage_subscription_id=NULLIF(?,0) WHERE id=?`, strings.TrimSpace(input.Name), boolInt(input.Enabled), input.MonthlyDataGB, input.UsageSubscriptionID, id)
 		}
 		if err != nil {
 			writeError(w, 400, err.Error())
@@ -3130,7 +3167,8 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	var id int64
 	var enabled int
 	var monthlyDataGB float64
-	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &enabled, &monthlyDataGB)
+	var usageSubscriptionID int64
+	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb,COALESCE(usage_subscription_id,0) FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &enabled, &monthlyDataGB, &usageSubscriptionID)
 	if err != nil || enabled != 1 {
 		http.NotFound(w, r)
 		return
@@ -3146,13 +3184,29 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Content-Type", "text/yaml; charset=utf-8")
 	w.Header().Set("Profile-Title", "base64:"+base64.StdEncoding.EncodeToString([]byte("sub-store")))
 	w.Header().Set("Content-Disposition", mime.FormatMediaType("inline", map[string]string{"filename": "sub-store"}))
-	if monthlyDataGB > 0 {
+	if usageSubscriptionID > 0 {
+		var usedGB, totalGB float64
+		var expireAt string
+		if usageErr := a.db.QueryRow(`SELECT used_gb,total_gb,COALESCE(expire_at,'') FROM subscriptions WHERE id=?`, usageSubscriptionID).Scan(&usedGB, &totalGB, &expireAt); usageErr == nil {
+			fields := []string{"upload=0", fmt.Sprintf("download=%d", gigabytesToBytes(usedGB)), fmt.Sprintf("total=%d", gigabytesToBytes(totalGB))}
+			if expiry, parseErr := time.Parse(time.RFC3339, expireAt); parseErr == nil {
+				fields = append(fields, fmt.Sprintf("expire=%d", expiry.Unix()))
+			}
+			w.Header().Set("Subscription-Userinfo", strings.Join(fields, "; "))
+		}
+	} else if monthlyDataGB > 0 {
 		nextMonth := time.Date(time.Now().UTC().Year(), time.Now().UTC().Month()+1, 1, 0, 0, 0, 0, time.UTC)
-		totalBytes := uint64(monthlyDataGB * float64(1024*1024*1024))
-		w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=0; total=%d; expire=%d", totalBytes, nextMonth.Unix()))
+		w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=0; total=%d; expire=%d", gigabytesToBytes(monthlyDataGB), nextMonth.Unix()))
 	}
 	w.WriteHeader(200)
 	_, _ = io.WriteString(w, a.generateConfig())
+}
+
+func gigabytesToBytes(value float64) uint64 {
+	if value <= 0 {
+		return 0
+	}
+	return uint64(value * float64(1024*1024*1024))
 }
 
 func hashPassword(password string) (string, error) {
