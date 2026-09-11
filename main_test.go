@@ -95,6 +95,83 @@ func TestNTPDirectRoutingMigration(t *testing.T) {
 	}
 }
 
+func TestTailscaleRoutingMigration(t *testing.T) {
+	app := testApp(t)
+	result, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Default','select','["DIRECT"]',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defaultGroupID, _ := result.LastInsertId()
+	if err := app.seedTailscaleRouting(); err != nil {
+		t.Fatal(err)
+	}
+
+	type expectedRule struct {
+		ruleType string
+		match    string
+		target   string
+		groupID  int64
+		priority int
+	}
+	for _, expected := range []expectedRule{
+		{ruleType: "DOMAIN", match: "login.tailscale.com", target: "Default", groupID: defaultGroupID, priority: 2},
+		{ruleType: "DOMAIN-SUFFIX", match: "tailscale.com", target: "DIRECT", priority: 3},
+		{ruleType: "DOMAIN-SUFFIX", match: "tailscale.io", target: "DIRECT", priority: 4},
+	} {
+		var target string
+		var groupID int64
+		var priority int
+		if err := app.db.QueryRow(`SELECT target,COALESCE(target_group_id,0),priority FROM rules WHERE rule_type=? AND match_value=?`, expected.ruleType, expected.match).Scan(&target, &groupID, &priority); err != nil {
+			t.Fatal(err)
+		}
+		if target != expected.target || groupID != expected.groupID || priority != expected.priority {
+			t.Fatalf("got %s,%s,%s group %d priority %d", expected.ruleType, expected.match, target, groupID, priority)
+		}
+	}
+
+	if _, err := app.db.Exec(`UPDATE proxy_groups SET name='Renamed default' WHERE id=?`, defaultGroupID); err != nil {
+		t.Fatal(err)
+	}
+	config := app.generateConfig()
+	for _, rule := range []string{
+		"DOMAIN,login.tailscale.com,Renamed default",
+		"DOMAIN-SUFFIX,tailscale.com,DIRECT",
+		"DOMAIN-SUFFIX,tailscale.io,DIRECT",
+	} {
+		if !strings.Contains(config, "\n  - "+rule+"\n") {
+			t.Fatalf("generated config is missing %q:\n%s", rule, config)
+		}
+	}
+}
+
+func TestTailscaleRoutingPreservesExistingRules(t *testing.T) {
+	app := testApp(t)
+	if _, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Default','select','["DIRECT"]',1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`INSERT INTO rules(rule_type,match_value,target,priority,enabled,created_at) VALUES('DOMAIN','login.tailscale.com','REJECT',99,0,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.seedTailscaleRouting(); err != nil {
+		t.Fatal(err)
+	}
+	var target string
+	var enabled int
+	var count int
+	if err := app.db.QueryRow(`SELECT target,enabled FROM rules WHERE rule_type='DOMAIN' AND match_value='login.tailscale.com'`).Scan(&target, &enabled); err != nil {
+		t.Fatal(err)
+	}
+	if target != "REJECT" || enabled != 0 {
+		t.Fatalf("existing login rule changed to target %q, enabled %d", target, enabled)
+	}
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM rules WHERE rule_type='DOMAIN' AND match_value='login.tailscale.com'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("got %d login rules, want 1", count)
+	}
+}
+
 func TestAccountUpdateRequiresCurrentPasswordAndSignsOutOtherSessions(t *testing.T) {
 	app := testApp(t)
 	oldHash, err := hashPassword("old-password")

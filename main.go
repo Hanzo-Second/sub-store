@@ -394,6 +394,9 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 	if err := a.seedNTPDirectRouting(); err != nil {
 		return err
 	}
+	if err := a.seedTailscaleRouting(); err != nil {
+		return err
+	}
 	if err := a.migrateAppleIntelligenceTextRules(); err != nil {
 		return err
 	}
@@ -437,6 +440,61 @@ func (a *App) seedNTPDirectRouting() error {
 	}
 	if err != nil {
 		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// seedTailscaleRouting sends authentication through the default outbound and
+// keeps the remaining Tailscale control and DERP traffic on the direct path.
+// Existing matching rules are preserved as explicit user choices.
+func (a *App) seedTailscaleRouting() error {
+	const migrationKey = "migration_tailscale_routing_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+
+	var defaultGroupID int64
+	var defaultGroupName string
+	if err := a.db.QueryRow(`SELECT id,name FROM proxy_groups WHERE LOWER(name) IN ('default','cheap') AND enabled=1 ORDER BY CASE WHEN LOWER(name)='default' THEN 0 ELSE 1 END,id LIMIT 1`).Scan(&defaultGroupID, &defaultGroupName); err != nil {
+		if err == sql.ErrNoRows {
+			return nil
+		}
+		return err
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	type tailscaleRule struct {
+		ruleType      string
+		match         string
+		target        string
+		targetGroupID any
+		priority      int
+	}
+	for _, rule := range []tailscaleRule{
+		{ruleType: "DOMAIN", match: "login.tailscale.com", target: defaultGroupName, targetGroupID: defaultGroupID, priority: 2},
+		{ruleType: "DOMAIN-SUFFIX", match: "tailscale.com", target: "DIRECT", priority: 3},
+		{ruleType: "DOMAIN-SUFFIX", match: "tailscale.io", target: "DIRECT", priority: 4},
+	} {
+		var existingID int64
+		err = tx.QueryRow(`SELECT id FROM rules WHERE UPPER(rule_type)=? AND LOWER(match_value)=LOWER(?) ORDER BY id LIMIT 1`, rule.ruleType, rule.match).Scan(&existingID)
+		if err == nil {
+			continue
+		}
+		if err != sql.ErrNoRows {
+			return err
+		}
+		if _, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES(?,?,?,?,?,1,?)`, rule.ruleType, rule.match, rule.target, rule.targetGroupID, rule.priority, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
 	}
 	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
 		return err
