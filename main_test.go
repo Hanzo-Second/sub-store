@@ -60,6 +60,41 @@ func TestFrontendAssetsAreEmbedded(t *testing.T) {
 	}
 }
 
+func TestNTPDirectRoutingMigration(t *testing.T) {
+	app := testApp(t)
+	var target string
+	var priority int
+	if err := app.db.QueryRow(`SELECT target,priority FROM rules WHERE rule_type='DST-PORT' AND match_value='123'`).Scan(&target, &priority); err != nil {
+		t.Fatal(err)
+	}
+	if target != "DIRECT" || priority != 1 {
+		t.Fatalf("got DST-PORT,123,%s at priority %d", target, priority)
+	}
+	if config := app.generateConfig(); !strings.Contains(config, "\n  - DST-PORT,123,DIRECT\n") {
+		t.Fatalf("generated config is missing the NTP direct rule:\n%s", config)
+	}
+
+	if _, err := app.db.Exec(`DELETE FROM settings WHERE key='migration_ntp_direct_routing_v1'; UPDATE rules SET target='REJECT',enabled=0 WHERE rule_type='DST-PORT' AND match_value='123'`); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.seedNTPDirectRouting(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	if err := app.db.QueryRow(`SELECT COUNT(*) FROM rules WHERE rule_type='DST-PORT' AND match_value='123'`).Scan(&count); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 {
+		t.Fatalf("got %d NTP rules, want 1", count)
+	}
+	if err := app.db.QueryRow(`SELECT target FROM rules WHERE rule_type='DST-PORT' AND match_value='123'`).Scan(&target); err != nil {
+		t.Fatal(err)
+	}
+	if target != "REJECT" {
+		t.Fatalf("existing NTP target was overwritten with %q", target)
+	}
+}
+
 func TestAccountUpdateRequiresCurrentPasswordAndSignsOutOtherSessions(t *testing.T) {
 	app := testApp(t)
 	oldHash, err := hashPassword("old-password")

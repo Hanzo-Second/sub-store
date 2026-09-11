@@ -391,6 +391,9 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 	if err := a.seedRedirHostDNSRouting(); err != nil {
 		return err
 	}
+	if err := a.seedNTPDirectRouting(); err != nil {
+		return err
+	}
 	if err := a.migrateAppleIntelligenceTextRules(); err != nil {
 		return err
 	}
@@ -407,6 +410,38 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 		return err
 	}
 	return nil
+}
+
+// seedNTPDirectRouting keeps standard NTP traffic off proxy paths. Existing
+// DST-PORT 123 rules are preserved because they represent an explicit user
+// routing choice.
+func (a *App) seedNTPDirectRouting() error {
+	const migrationKey = "migration_ntp_direct_routing_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var existingID int64
+	err = tx.QueryRow(`SELECT id FROM rules WHERE UPPER(rule_type)='DST-PORT' AND TRIM(match_value)='123' ORDER BY id LIMIT 1`).Scan(&existingID)
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES('DST-PORT','123','DIRECT',NULL,1,1,?)`, time.Now().UTC().Format(time.RFC3339))
+	} else if err != nil {
+		return err
+	}
+	if err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // migratePreferredRoutingGroupOrder makes new clients start with the intended
