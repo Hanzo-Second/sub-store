@@ -159,6 +159,7 @@ type proxyServer struct {
 }
 
 type routingRule struct {
+	IsOverride    bool   `json:"isOverride"`
 	ID            int64  `json:"id"`
 	RuleType      string `json:"ruleType"`
 	Match         string `json:"match"`
@@ -260,6 +261,8 @@ func (a *App) routes() http.Handler {
 	mux.HandleFunc("/api/subscriptions/", a.auth(a.handleSubscriptionAction))
 	mux.HandleFunc("/api/proxies", a.auth(a.handleProxies))
 	mux.HandleFunc("/api/proxies/", a.auth(a.handleProxyAction))
+	mux.HandleFunc("/api/rules/lookup", a.auth(a.handleRuleLookup))
+	mux.HandleFunc("/api/rules/override", a.auth(a.handleRuleOverride))
 	mux.HandleFunc("/api/rules", a.auth(a.handleRules))
 	mux.HandleFunc("/api/rules/reorder", a.auth(a.handleRuleReorder))
 	mux.HandleFunc("/api/rules/", a.auth(a.handleRuleAction))
@@ -358,7 +361,7 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 			return alterErr
 		}
 	}
-	for _, column := range []string{"target_group_id INTEGER"} {
+	for _, column := range []string{"target_group_id INTEGER", "is_override INTEGER NOT NULL DEFAULT 0"} {
 		if _, alterErr := a.db.Exec(`ALTER TABLE rules ADD COLUMN ` + column); alterErr != nil && !strings.Contains(alterErr.Error(), "duplicate column name") {
 			return alterErr
 		}
@@ -2083,8 +2086,8 @@ func (a *App) handleRules(w http.ResponseWriter, r *http.Request) {
 	writeJSON(w, 201, x)
 }
 func (a *App) listRules() []routingRule {
-	rows, err := a.db.Query(`SELECT rules.id,rule_type,match_value,COALESCE(proxy_groups.name,rules.target),COALESCE(target_group_id,0),priority,rules.enabled
-		FROM rules LEFT JOIN proxy_groups ON proxy_groups.id=rules.target_group_id ORDER BY priority,rules.id`)
+	rows, err := a.db.Query(`SELECT rules.id,rule_type,match_value,COALESCE(proxy_groups.name,rules.target),COALESCE(target_group_id,0),priority,rules.enabled,rules.is_override
+		FROM rules LEFT JOIN proxy_groups ON proxy_groups.id=rules.target_group_id ORDER BY rules.is_override DESC,priority,rules.id`)
 	if err != nil {
 		return []routingRule{}
 	}
@@ -2093,7 +2096,7 @@ func (a *App) listRules() []routingRule {
 	for rows.Next() {
 		var x routingRule
 		var enabled int
-		_ = rows.Scan(&x.ID, &x.RuleType, &x.Match, &x.Target, &x.TargetGroupID, &x.Priority, &enabled)
+		_ = rows.Scan(&x.ID, &x.RuleType, &x.Match, &x.Target, &x.TargetGroupID, &x.Priority, &enabled, &x.IsOverride)
 		x.Enabled = enabled == 1
 		result = append(result, x)
 	}
@@ -3055,34 +3058,7 @@ func (a *App) generateConfig() string {
 		b.WriteString(fmt.Sprintf("  %q:\n    type: %s\n    behavior: %s\n    format: %s\n    url: %q\n    path: %s\n    interval: %d\n", provider.Name, provider.Type, provider.Behavior, provider.Format, provider.PrimaryURL, provider.Path, maxInt(provider.IntervalMinutes, 60)))
 	}
 	b.WriteString("\nrules:\n")
-	type generatedRule struct {
-		priority int
-		sequence int
-		value    string
-	}
-	generatedRules := []generatedRule{}
-	sequence := 0
-	for _, rule := range rules {
-		if rule.Enabled {
-			generatedRules = append(generatedRules, generatedRule{priority: rule.Priority, sequence: sequence, value: fmt.Sprintf("%s,%s,%s", rule.RuleType, rule.Match, rule.Target)})
-			sequence++
-		}
-	}
-	for _, group := range serviceRuleGroups {
-		if !group.Enabled || group.Target == "" {
-			continue
-		}
-		for _, rule := range group.Rules {
-			generatedRules = append(generatedRules, generatedRule{priority: group.Priority, sequence: sequence, value: rule + "," + group.Target})
-			sequence++
-		}
-	}
-	sort.SliceStable(generatedRules, func(i, j int) bool {
-		if generatedRules[i].priority == generatedRules[j].priority {
-			return generatedRules[i].sequence < generatedRules[j].sequence
-		}
-		return generatedRules[i].priority < generatedRules[j].priority
-	})
+	generatedRules := orderedRoutingRules(rules, serviceRuleGroups)
 	for _, rule := range generatedRules {
 		b.WriteString("  - " + rule.value + "\n")
 	}
@@ -3303,3 +3279,40 @@ func writeError(w http.ResponseWriter, status int, message string) {
 	writeJSON(w, status, map[string]string{"error": message})
 }
 func methodNotAllowed(w http.ResponseWriter) { writeError(w, 405, "Method not allowed") }
+
+type generatedRule struct {
+	isOverride bool
+	priority   int
+	sequence   int
+	value      string
+}
+
+func orderedRoutingRules(rules []routingRule, serviceRuleGroups []serviceRuleGroup) []generatedRule {
+	generatedRules := []generatedRule{}
+	sequence := 0
+	for _, rule := range rules {
+		if rule.Enabled {
+			generatedRules = append(generatedRules, generatedRule{isOverride: rule.IsOverride, priority: rule.Priority, sequence: sequence, value: fmt.Sprintf("%s,%s,%s", rule.RuleType, rule.Match, rule.Target)})
+			sequence++
+		}
+	}
+	for _, group := range serviceRuleGroups {
+		if !group.Enabled || group.Target == "" {
+			continue
+		}
+		for _, rule := range group.Rules {
+			generatedRules = append(generatedRules, generatedRule{priority: group.Priority, sequence: sequence, value: rule + "," + group.Target})
+			sequence++
+		}
+	}
+	sort.SliceStable(generatedRules, func(i, j int) bool {
+		if generatedRules[i].isOverride != generatedRules[j].isOverride {
+			return generatedRules[i].isOverride
+		}
+		if generatedRules[i].priority == generatedRules[j].priority {
+			return generatedRules[i].sequence < generatedRules[j].sequence
+		}
+		return generatedRules[i].priority < generatedRules[j].priority
+	})
+	return generatedRules
+}

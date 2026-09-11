@@ -337,6 +337,20 @@
                 <span>+</span> Add rule
               </button>
             </div>
+            <div class="panel rule-lookup-panel">
+              <h2>Rule search</h2>
+              <p>Preview rule-mode routing for a domain or IP. Uses cached provider lists; client DNS, GEOIP, and provider versions can affect the actual route.</p>
+              <form id="rule-lookup-form" class="rule-lookup-controls">
+                <label>Domain or IP<input id="rule-lookup-input" placeholder="example.com or 1.1.1.1" required maxlength="253" /></label>
+                <button class="button button-primary" type="submit">Search rules</button>
+              </form>
+              <p id="rule-lookup-result" role="status" aria-live="polite"></p>
+              <form id="rule-override-form" class="rule-lookup-controls" hidden>
+                <label>Override destination<select id="rule-override-target" required></select></label>
+                <button class="button button-primary" type="submit">Save override</button>
+                <p>Applies to this exact domain or IP, before ordinary and service rules. Overrides stay first when rules are reordered. Edit or delete it in the list below. Refresh your client subscription to apply changes.</p>
+              </form>
+            </div>
             <div class="panel service-rule-panel">
               <div class="panel-header">
                 <div>
@@ -1184,6 +1198,7 @@
                 <option>DOMAIN-SUFFIX</option>
                 <option>DOMAIN</option>
                 <option>IP-CIDR</option>
+                <option>IP-CIDR6</option>
                 <option>GEOIP</option>
                 <option>PROCESS-NAME</option>
                 <option>RULE-SET</option>
@@ -1192,8 +1207,7 @@
               >Priority<input
                 name="priority"
                 type="number"
-                value="100"
-                min="1" /></label
+                value="100" /></label
             ><label id="rule-match-text-field"
               >Match value<input
                 name="match"

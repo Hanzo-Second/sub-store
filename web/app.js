@@ -1,3 +1,6 @@
+let lookupDestination = '';
+let lookupRevision = 0;
+let overrideSaving = false;
 localStorage.removeItem('substore-servers');
 let servers = [];
 const $ = (selector) => document.querySelector(selector);
@@ -698,7 +701,7 @@ function renderRules(items) {
   if (!panel) return;
   $$('.rule-row').forEach((row) => row.remove());
   const fragment = document.createDocumentFragment();
-  (items || []).forEach((item) => { const row = document.createElement('div'); row.className = 'rule-row'; row.draggable = true; row.dataset.ruleId = item.id; row.innerHTML = `<span class="rule-type"><span class="drag-handle" title="Drag to reorder">⠿</span> ${escapeHTML(item.ruleType)}</span><strong>${escapeHTML(item.match)}</strong><span class="route-chip direct-chip">${escapeHTML(item.target)}</span><span class="priority">Order <i>${item.priority}</i></span><span class="row-actions"><button class="icon-action" data-edit-rule="${item.id}" aria-label="Edit routing rule" title="Edit routing rule">${editIcon}</button><button class="icon-action danger" data-rule-delete="${item.id}" aria-label="Delete routing rule" title="Delete routing rule">${trashIcon}</button></span>`; fragment.appendChild(row); });
+  (items || []).forEach((item) => { const row = document.createElement('div'); row.className = 'rule-row'; row.draggable = true; row.dataset.ruleId = item.id; row.dataset.isOverride = String(item.isOverride); row.innerHTML = `<span class="rule-type"><span class="drag-handle" title="Drag to reorder">⠿</span> ${escapeHTML(item.ruleType)}</span><strong>${escapeHTML(item.match)}</strong><span class="route-chip direct-chip">${escapeHTML(item.target)}</span><span class="priority">${item.isOverride ? "Override · " : "Order "}<i>${item.priority}</i></span><span class="row-actions"><button class="icon-action" data-edit-rule="${item.id}" aria-label="Edit routing rule" title="Edit routing rule">${editIcon}</button><button class="icon-action danger" data-rule-delete="${item.id}" aria-label="Delete routing rule" title="Delete routing rule">${trashIcon}</button></span>`; fragment.appendChild(row); });
   panel.appendChild(fragment);
   $$('[data-edit-rule]').forEach((button) => button.addEventListener('click', () => openRuleModal((items || []).find((item) => String(item.id) === button.dataset.editRule))));
   $$('[data-rule-delete]').forEach((button) => button.addEventListener('click', async () => { if (!(await confirmDelete('Delete this routing rule?', 'Traffic will no longer follow this routing rule.'))) return; try { await api(`/api/rules/${button.dataset.ruleDelete}`, { method: 'DELETE' }); await refreshWorkspace(); } catch (error) { showRequestError(error); } }));
@@ -712,6 +715,7 @@ function renderRules(items) {
       row.classList.remove('drag-over');
       const source = $(`.rule-row[data-rule-id="${event.dataTransfer.getData('text/plain')}"]`);
       if (!source || source === row) return;
+      if (source.dataset.isOverride !== row.dataset.isOverride) { showNotice('Overrides stay first', 'Reorder overrides among overrides, or ordinary rules among ordinary rules.'); return; }
       const rows = $$('.rule-row');
       if (rows.indexOf(source) < rows.indexOf(row)) row.after(source); else row.before(source);
       const ids = $$('.rule-row').map((item) => Number(item.dataset.ruleId));
@@ -793,6 +797,7 @@ $$('#client-config-form .settings-switch').forEach((label) => label.addEventList
 $('#save-client-config').addEventListener('click', async () => { const form = $('#client-config-form'); const data = Object.fromEntries(new FormData(form)); ['allowLan','dnsEnabled','dnsIPv6','dnsUseHosts','dnsFallbackGeoIP'].forEach((key) => { data[key] = form.elements[key].checked; }); data.mixedPort = Number(data.mixedPort); data.dnsPolicyGroupId = Number(data.dnsPolicyGroupId); try { const settings = await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ...state.settings, ...data }) }); state.settings = settings; renderClientConfig(settings); await refreshConfig(); showNotice('Client configuration saved', 'Generated YAML now uses these client settings.'); } catch (error) { alert(error.message); } });
 
 refreshWorkspace = async function refreshWorkspaceWithAllData() {
+  resetRuleLookup();
   const [proxyData, subscriptions, rules, accessKeys, settings, groups, providers, serviceRuleGroups] = await Promise.all([api('/api/proxies'), api('/api/subscriptions'), api('/api/rules'), api('/api/access-keys'), api('/api/settings'), api('/api/groups'), api('/api/rule-providers'), api('/api/service-rule-groups')]);
   servers = proxyData.map((server) => ({ ...server, status: server.enabled ? 'Online' : 'Offline', type: server.id < 0 ? 'Subscription' : 'Manual', latency: server.latency || '—', logo: server.name[0]?.toUpperCase() || 'P', color: server.id < 0 ? 'purple' : 'blue' }));
   state.accessKeys = accessKeys; state.settings = settings; state.groups = groups; state.providers = providers; state.serviceRuleGroups = serviceRuleGroups; state.subscriptions = subscriptions; workspaceSubscriptions = subscriptions;
@@ -888,4 +893,66 @@ document.addEventListener('keydown', (event) => {
   const first = controls[0], last = controls.at(-1);
   if (event.shiftKey && document.activeElement === first) { event.preventDefault(); last?.focus(); }
   else if (!event.shiftKey && document.activeElement === last) { event.preventDefault(); first?.focus(); }
+});
+
+function resetRuleLookup() {
+  lookupDestination = '';
+  lookupRevision++;
+  $('#rule-override-form').hidden = true;
+  $('#rule-lookup-result').textContent = '';
+  $('#rule-lookup-form button').disabled = overrideSaving;
+}
+$('#rule-lookup-input').addEventListener('input', resetRuleLookup);
+$('#rule-lookup-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (overrideSaving) return;
+  resetRuleLookup();
+  const revision = lookupRevision;
+  const input = $('#rule-lookup-input').value;
+  const button = event.target.querySelector('button');
+  button.disabled = true;
+  $('#rule-lookup-result').textContent = 'Checking rules…';
+  try {
+    const result = await api(`/api/rules/lookup?destination=${encodeURIComponent(input)}`);
+    if (revision !== lookupRevision) return;
+    lookupDestination = result.destination;
+    const modeNote = state.settings?.mode && state.settings.mode !== 'rule' ? `Client mode is ${state.settings.mode}; these rules apply only in rule mode. ` : '';
+    $('#rule-lookup-result').textContent = modeNote + (result.certain
+      ? `${result.destination} → ${result.target}. Matched: ${result.rule}`
+      : `${result.destination}: routing is uncertain. First known match: ${result.target} (${result.rule}). Earlier rules require client data or an updated provider cache: ${result.unresolved.join('; ')}`);
+    $('#rule-override-target').innerHTML = '<option value="DIRECT">DIRECT</option><option value="REJECT">REJECT</option>' + (state.groups || []).filter((group) => group.enabled).map((group) => `<option value="group-id:${group.id}">${escapeHTML(group.name)}</option>`).join('');
+    const choice = Array.from($('#rule-override-target').options).find((option) => option.textContent === result.target);
+    if (choice) $('#rule-override-target').value = choice.value;
+    $('#rule-override-form').hidden = false;
+  } catch (error) { if (revision === lookupRevision) $('#rule-lookup-result').textContent = error.message; }
+  finally { if (revision === lookupRevision) button.disabled = false; }
+});
+$('#rule-override-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  if (!lookupDestination || overrideSaving) return;
+  const button = event.target.querySelector('button');
+  overrideSaving = true;
+  button.disabled = true;
+  button.textContent = 'Saving…';
+  $('#rule-lookup-input').disabled = true;
+  $('#rule-lookup-form button').disabled = true;
+  $('#rule-override-target').disabled = true;
+  let saved = false;
+  try {
+    await api('/api/rules/override', { method: 'POST', body: JSON.stringify({ destination: lookupDestination, target: $('#rule-override-target').value }) });
+    saved = true;
+    await refreshWorkspace();
+    showNotice('Override saved', 'Refresh your client subscription to apply the new routing rule.');
+  } catch (error) {
+    if (saved) { resetRuleLookup(); showNotice('Override saved', 'Workspace refresh failed. Reload the page to see the saved rule.'); }
+    else showRequestError(error);
+  } finally {
+    overrideSaving = false;
+    button.disabled = false;
+    button.textContent = 'Save override';
+    $('#rule-lookup-input').disabled = false;
+    $('#rule-lookup-form button').disabled = false;
+    $('#rule-override-target').disabled = false;
+  }
+  if (saved) $('#rule-lookup-form').requestSubmit();
 });

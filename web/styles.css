@@ -4402,3 +4402,12 @@ input[type="url"],
     grid-column: 3;
   }
 }
+
+.rule-lookup-panel { padding: 24px; margin-bottom: 24px; }
+.rule-lookup-controls { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; margin-top: 16px; }
+.rule-lookup-controls[hidden] { display: none; }
+.rule-lookup-controls label { display: grid; gap: 8px; flex: 1; min-width: 180px; }
+.rule-lookup-controls input, .rule-lookup-controls select { width: 100%; padding: 12px; border: 1px solid var(--line, #dde2e8); border-radius: 8px; background: var(--bg); color: inherit; }
+.rule-lookup-controls p { flex-basis: 100%; }
+#rule-lookup-result { overflow-wrap: anywhere; }
+@media (max-width: 600px) { .rule-lookup-controls { flex-direction: column; align-items: stretch; } }
