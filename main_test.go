@@ -470,6 +470,56 @@ func TestAccessKeyPublishesMonthlyAllowanceAndSubStoreName(t *testing.T) {
 	}
 }
 
+func TestNumberedSubscriptionProfilesSelectDNSMode(t *testing.T) {
+	app := testApp(t)
+	key := "profile-test-key"
+	if _, err := app.db.Exec(`INSERT INTO access_keys(name,key_hash,key_value,key_preview,enabled,created_at) VALUES('Profiles',?,?,?,1,'now')`, hashToken(key), key, "pr••ey"); err != nil {
+		t.Fatal(err)
+	}
+	// The numbered URL must override the legacy setting rather than inherit it.
+	if _, err := app.db.Exec(`INSERT INTO settings(key,value) VALUES('dns_enhanced_mode','redir-host') ON CONFLICT(key) DO UPDATE SET value=excluded.value`); err != nil {
+		t.Fatal(err)
+	}
+
+	for _, tc := range []struct {
+		profile string
+		mode    string
+	}{
+		{profile: "0", mode: "fake-ip"},
+		{profile: "1", mode: "redir-host"},
+	} {
+		recorder := httptest.NewRecorder()
+		app.handlePublicSubscription(recorder, httptest.NewRequest(http.MethodGet, "/sub/"+key+"/"+tc.profile, nil))
+		if recorder.Code != http.StatusOK {
+			t.Fatalf("profile %s returned %d: %s", tc.profile, recorder.Code, recorder.Body.String())
+		}
+		var config map[string]any
+		if err := yaml.Unmarshal(recorder.Body.Bytes(), &config); err != nil {
+			t.Fatalf("profile %s returned invalid YAML: %v", tc.profile, err)
+		}
+		dns, ok := config["dns"].(map[string]any)
+		if !ok || dns["enhanced-mode"] != tc.mode {
+			t.Fatalf("profile %s DNS mode = %v, want %s", tc.profile, dns["enhanced-mode"], tc.mode)
+		}
+		_, hasFakeIPRange := dns["fake-ip-range"]
+		if hasFakeIPRange != (tc.profile == "0") {
+			t.Fatalf("profile %s fake-ip-range presence = %t", tc.profile, hasFakeIPRange)
+		}
+	}
+
+	invalid := httptest.NewRecorder()
+	app.handlePublicSubscription(invalid, httptest.NewRequest(http.MethodGet, "/sub/"+key+"/2", nil))
+	if invalid.Code != http.StatusNotFound {
+		t.Fatalf("invalid profile returned %d, want 404", invalid.Code)
+	}
+
+	preview := httptest.NewRecorder()
+	app.handleConfigPreview(preview, httptest.NewRequest(http.MethodGet, "/api/config/preview?profile=2", nil))
+	if preview.Code != http.StatusBadRequest {
+		t.Fatalf("invalid preview profile returned %d, want 400", preview.Code)
+	}
+}
+
 func TestAccessKeyPublishesSelectedSubscriptionUsage(t *testing.T) {
 	app := testApp(t)
 	expiresAt := time.Date(2026, time.October, 1, 0, 0, 0, 0, time.UTC)

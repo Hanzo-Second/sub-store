@@ -8,6 +8,11 @@ const $$ = (selector) => [...document.querySelectorAll(selector)];
 function escapeHTML(value = '') { return String(value).replace(/[&<>'"]/g, (char) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', "'": '&#39;', '"': '&quot;' }[char])); }
 const serverFilters = { protocol: 'all', status: 'all' };
 let workspaceSubscriptions = [];
+const CONFIG_PROFILES = {
+  '0': { label: 'Fake IP', enhancedMode: 'fake-ip' },
+  '1': { label: 'Redir host', enhancedMode: 'redir-host' },
+};
+let selectedConfigProfile = ['0', '1'].includes(localStorage.getItem('substore-config-profile')) ? localStorage.getItem('substore-config-profile') : '0';
 const editIcon = '<svg viewBox="0 0 20 20"><path d="m13.8 4.2 2 2M5 15l.5-3.2L13.9 3.4a1.4 1.4 0 0 1 2 0l.7.7a1.4 1.4 0 0 1 0 2L8.2 14.5 5 15Z"/></svg>';
 const trashIcon = '<svg viewBox="0 0 20 20"><path d="M4 6h12M8 6V4h4v2m-6 0 .7 10h6.6L14 6M8.5 9v4.5M11.5 9v4.5"/></svg>';
 const copyIcon = '<svg viewBox="0 0 20 20"><rect x="7" y="7" width="9" height="9" rx="1.5"/><path d="M13 7V5.5A1.5 1.5 0 0 0 11.5 4h-6A1.5 1.5 0 0 0 4 5.5v6A1.5 1.5 0 0 0 5.5 13H7"/></svg>';
@@ -88,7 +93,7 @@ async function copyText(value) {
   const input = document.createElement('textarea'); input.value = value; input.setAttribute('readonly', ''); input.style.cssText = 'position:fixed;opacity:0;pointer-events:none'; document.body.append(input); input.select();
   try { return document.execCommand('copy'); } catch (_) { return false; } finally { input.remove(); }
 }
-function subscriptionURL(key) { return `${(state.settings?.baseUrl || location.origin).replace(/\/$/, '')}/sub/${key}`; }
+function subscriptionURL(key) { return `${(state.settings?.baseUrl || location.origin).replace(/\/$/, '')}/sub/${key}/${selectedConfigProfile}`; }
 function showAccessKeyResult(key, title = 'Access key ready') { $('#access-result-title').textContent = title; $('#access-result-url').value = subscriptionURL(key); $('#access-result-backdrop').classList.add('open'); $('#access-result-backdrop').setAttribute('aria-hidden', 'false'); }
 function closeAccessKeyResult() { $('#access-result-backdrop').classList.remove('open'); $('#access-result-backdrop').setAttribute('aria-hidden', 'true'); $('#access-result-url').value = ''; }
 function setAccessKeyReplacement(form, replace) { form.elements.replaceKey.checked = replace; $('.key-mode-tabs').style.display = replace ? 'grid' : 'none'; $('#generated-key-field').classList.toggle('hide', !replace); $('#manual-key-field').classList.toggle('show', replace && $('.key-mode.active').dataset.keyMode === 'manual'); $('[name="manualKey"]').required = replace && $('.key-mode.active').dataset.keyMode === 'manual'; $('[name="generatedKey"]').required = replace && $('.key-mode.active').dataset.keyMode !== 'manual'; if (replace && !form.elements.generatedKey.value) form.elements.generatedKey.value = makeAccessKey(); }
@@ -302,7 +307,7 @@ function renderUser() { if (!state.user) return; const name = state.user.usernam
 function renderAccessKeys() {
   const rows = $('#access-key-rows');
   if (!rows) return;
-  rows.innerHTML = state.accessKeys.length ? state.accessKeys.map((key) => { const url = key.key ? subscriptionURL(key.key) : `${(state.settings?.baseUrl || location.origin).replace(/\/$/, '')}/sub/${key.keyPreview}`; const copy = key.key ? `<button class="icon-action" data-copy-access="${key.id}" aria-label="Copy URL for ${escapeHTML(key.name)}" title="Copy subscription URL">${copyIcon}</button>` : ''; const usage = key.usageSubscriptionName ? `Mirrors ${key.usageSubscriptionName}` : key.monthlyDataGB > 0 ? `${Number(key.monthlyDataGB).toLocaleString()} GB/month` : 'Not published'; return `<div class="access-key-row"><div class="key-value"><div class="key-icon">⌘</div><div><strong>${escapeHTML(key.name)}</strong><span>${escapeHTML(url)}</span></div></div><span>Private subscription</span><span class="status-pill ${key.enabled ? 'online' : 'offline'}"><i></i>${key.enabled ? 'Active' : 'Disabled'}</span><span class="muted-text">${escapeHTML(usage)}</span><span class="muted-text">${key.lastUsedAt ? escapeHTML(key.lastUsedAt) : 'Never'}</span><span class="row-actions">${copy}<button class="icon-action" data-edit-access="${key.id}" aria-label="Edit ${escapeHTML(key.name)}" title="Edit access key">${editIcon}</button><button class="icon-action danger" data-delete-access="${key.id}" aria-label="Delete ${escapeHTML(key.name)}" title="Delete access key">${trashIcon}</button></span></div>`; }).join('') : '<div class="empty-preview"><div class="empty-icon">⌘</div><h3>No access keys yet</h3><p>Create one to share your generated configuration.</p></div>';
+  rows.innerHTML = state.accessKeys.length ? state.accessKeys.map((key) => { const url = key.key ? subscriptionURL(key.key) : `${(state.settings?.baseUrl || location.origin).replace(/\/$/, '')}/sub/${key.keyPreview}/${selectedConfigProfile}`; const copy = key.key ? `<button class="icon-action" data-copy-access="${key.id}" aria-label="Copy URL for ${escapeHTML(key.name)}" title="Copy subscription URL">${copyIcon}</button>` : ''; const usage = key.usageSubscriptionName ? `Mirrors ${key.usageSubscriptionName}` : key.monthlyDataGB > 0 ? `${Number(key.monthlyDataGB).toLocaleString()} GB/month` : 'Not published'; return `<div class="access-key-row"><div class="key-value"><div class="key-icon">⌘</div><div><strong>${escapeHTML(key.name)}</strong><span>${escapeHTML(url)}</span></div></div><span>Private subscription</span><span class="status-pill ${key.enabled ? 'online' : 'offline'}"><i></i>${key.enabled ? 'Active' : 'Disabled'}</span><span class="muted-text">${escapeHTML(usage)}</span><span class="muted-text">${key.lastUsedAt ? escapeHTML(key.lastUsedAt) : 'Never'}</span><span class="row-actions">${copy}<button class="icon-action" data-edit-access="${key.id}" aria-label="Edit ${escapeHTML(key.name)}" title="Edit access key">${editIcon}</button><button class="icon-action danger" data-delete-access="${key.id}" aria-label="Delete ${escapeHTML(key.name)}" title="Delete access key">${trashIcon}</button></span></div>`; }).join('') : '<div class="empty-preview"><div class="empty-icon">⌘</div><h3>No access keys yet</h3><p>Create one to share your generated configuration.</p></div>';
   $$('[data-copy-access]').forEach((button) => button.addEventListener('click', async () => { const item = state.accessKeys.find((key) => String(key.id) === button.dataset.copyAccess); const copied = await copyText(item ? subscriptionURL(item.key) : ''); showNotice(copied ? 'Subscription URL copied' : 'Copy failed', copied ? 'Paste it into Clash, Mihomo, or OpenClash.' : 'Try again or replace the key.'); }));
   $$('[data-edit-access]').forEach((button) => button.addEventListener('click', () => openAccessModal(state.accessKeys.find((key) => String(key.id) === button.dataset.editAccess))));
   $$('[data-delete-access]').forEach((button) => button.addEventListener('click', async () => { if (!(await confirmDelete('Delete this access key?', 'Clients using this private subscription URL will lose access.'))) return; try { await api(`/api/access-keys/${button.dataset.deleteAccess}`, { method: 'DELETE' }); await refreshWorkspace(); } catch (error) { showRequestError(error); } }));
@@ -759,7 +764,7 @@ async function refreshConfig() {
   const copyButton = $('#view-config .code-toolbar .text-button');
   copyButton.disabled = true;
   try {
-    const yaml = await api('/api/config/preview');
+    const yaml = await api(`/api/config/preview?profile=${selectedConfigProfile}`);
     renderConfigYAML(yaml);
     copyButton.disabled = false;
     return true;
@@ -771,6 +776,30 @@ async function refreshConfig() {
   }
 }
 function showNotice(title, message) { $('.toast strong').textContent = title; $('.toast p').textContent = message; showToast(); }
+function syncConfigProfileControls() {
+  const profile = CONFIG_PROFILES[selectedConfigProfile];
+  $$('[data-config-profile]').forEach((button) => {
+    const active = button.dataset.configProfile === selectedConfigProfile;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  $$('[data-config-profile-only]').forEach((element) => element.classList.toggle('profile-hidden', element.dataset.configProfileOnly !== selectedConfigProfile));
+  const enhancedMode = $('#client-config-form')?.elements.dnsEnhancedMode;
+  if (enhancedMode) enhancedMode.value = profile.enhancedMode;
+  const description = $('#dns-policy-description');
+  if (description) description.textContent = selectedConfigProfile === '0'
+    ? 'Fake IP returns synthetic addresses for domain rules. Use the filter for services that need real addresses.'
+    : 'Redir host sends Chinese domains only to domestic DNS and all other domains through the selected proxy group.';
+}
+function selectConfigProfile(profile) {
+  if (!CONFIG_PROFILES[profile] || profile === selectedConfigProfile) return;
+  selectedConfigProfile = profile;
+  localStorage.setItem('substore-config-profile', profile);
+  syncConfigProfileControls();
+  renderAccessKeys();
+  if (state.settings) renderClientConfig(state.settings);
+  refreshConfig();
+}
 function renderClientConfig(settings) {
   const form = $('#client-config-form');
   if (!form) return;
@@ -787,12 +816,15 @@ function renderClientConfig(settings) {
     if (!field) return;
     field.type === 'checkbox' ? field.checked = value : field.value = value;
   });
+  syncConfigProfileControls();
   form.elements.groupLayout.value = localStorage.getItem('substore-group-layout') || 'cards';
   const selectedGroup = (state.groups || []).find((group) => String(group.id) === String(settings.dnsPolicyGroupId));
-  const rows = [['Mixed port', settings.mixedPort], ['Allow LAN', settings.allowLan ? 'Enabled' : 'Disabled'], ['Mode', settings.mode], ['DNS', settings.dnsEnabled ? `${settings.dnsEnhancedMode} enabled` : 'Disabled'], ['Domestic DNS', settings.dnsNameservers], ['Overseas DNS via', selectedGroup?.name || 'Not configured']];
+  const rows = [['Profile', `${CONFIG_PROFILES[selectedConfigProfile].label} (${selectedConfigProfile})`], ['Mixed port', settings.mixedPort], ['Allow LAN', settings.allowLan ? 'Enabled' : 'Disabled'], ['Mode', settings.mode], ['DNS', settings.dnsEnabled ? `${CONFIG_PROFILES[selectedConfigProfile].enhancedMode} enabled` : 'Disabled'], ['Domestic DNS', settings.dnsNameservers], ['Overseas DNS via', selectedConfigProfile === '1' ? selectedGroup?.name || 'Not configured' : 'Not used']];
   $('#client-config-summary').innerHTML = rows.map(([name, value]) => `<div><dt>${escapeHTML(name)}</dt><dd title="${escapeHTML(value)}">${escapeHTML(value)}</dd></div>`).join('');
 }
 $('#client-config-form').addEventListener('change', (event) => { if (event.target.name !== 'groupLayout') return; localStorage.setItem('substore-group-layout', event.target.value); renderGroups(state.groups); });
+$$('[data-config-profile]').forEach((button) => button.addEventListener('click', () => selectConfigProfile(button.dataset.configProfile)));
+syncConfigProfileControls();
 $$('#client-config-form .settings-switch').forEach((label) => label.addEventListener('click', (event) => { const input = label.querySelector('input[type="checkbox"]'); if (!input || event.target === input) return; event.preventDefault(); input.checked = !input.checked; input.dispatchEvent(new Event('change', { bubbles: true })); }));
 $('#save-client-config').addEventListener('click', async () => { const form = $('#client-config-form'); const data = Object.fromEntries(new FormData(form)); ['allowLan','dnsEnabled','dnsIPv6','dnsUseHosts','dnsFallbackGeoIP'].forEach((key) => { data[key] = form.elements[key].checked; }); data.mixedPort = Number(data.mixedPort); data.dnsPolicyGroupId = Number(data.dnsPolicyGroupId); try { const settings = await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ...state.settings, ...data }) }); state.settings = settings; renderClientConfig(settings); await refreshConfig(); showNotice('Client configuration saved', 'Generated YAML now uses these client settings.'); } catch (error) { alert(error.message); } });
 

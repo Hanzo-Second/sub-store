@@ -3321,6 +3321,52 @@ button:disabled {
   gap: 20px;
   align-items: center;
 }
+.page-heading-actions {
+  display: flex;
+  align-items: center;
+  gap: 12px;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+}
+.config-profile-switch {
+  display: inline-flex;
+  align-items: center;
+  gap: 3px;
+  padding: 4px;
+  border: 1px solid #dde6d7;
+  border-radius: 999px;
+  background: #f3f6ef;
+  box-shadow: 0 2px 8px rgba(35, 66, 39, 0.08);
+}
+.config-profile-switch button {
+  min-width: 96px;
+  height: 34px;
+  padding: 0 15px;
+  border: 0;
+  border-radius: 999px;
+  background: transparent;
+  color: #74816f;
+  font: 650 12px var(--font-body);
+  cursor: pointer;
+  transition: background 150ms ease, color 150ms ease, box-shadow 150ms ease;
+}
+.config-profile-switch button small {
+  margin-left: 4px;
+  font: 600 9px var(--font-code);
+  opacity: 0.7;
+}
+.config-profile-switch button.active {
+  background: #4f8752;
+  color: #fff;
+  box-shadow: 0 2px 7px rgba(57, 103, 61, 0.24);
+}
+.config-profile-switch button:focus-visible {
+  outline: 2px solid #6c9b69;
+  outline-offset: 2px;
+}
+[data-config-profile-only].profile-hidden {
+  display: none;
+}
 .page-heading h1 {
   font-size: 30px;
   letter-spacing: -1.1px;
@@ -4160,6 +4206,10 @@ label textarea:focus {
   }
   .page-heading .button {
     margin: 0;
+  }
+  .page-heading-actions {
+    width: 100%;
+    justify-content: space-between;
   }
   .subheading {
     font-size: 12px;

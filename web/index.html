@@ -423,7 +423,13 @@
                   Preview and distribute your merged Clash Meta configuration.
                 </p>
               </div>
-              <button class="button button-primary">Regenerate config</button>
+              <div class="page-heading-actions">
+                <div class="config-profile-switch" aria-label="Generated config profile">
+                  <button type="button" data-config-profile="0" aria-pressed="true">Fake IP <small>0</small></button>
+                  <button type="button" data-config-profile="1" aria-pressed="false">Redir host <small>1</small></button>
+                </div>
+                <button class="button button-primary">Regenerate config</button>
+              </div>
             </div>
             <div class="config-layout">
               <div class="panel config-preview">
@@ -589,16 +595,23 @@
                 <p class="eyebrow">BUILD</p>
                 <h1>Client configuration</h1>
                 <p class="subheading">
-                  Client settings are separate from generated YAML, so each
-                  change is clear.
+                  Choose a DNS profile; shared client settings feed both
+                  generated outputs.
                 </p>
               </div>
-              <button class="button button-primary" id="save-client-config">
-                Save client configuration
-              </button>
+              <div class="page-heading-actions">
+                <div class="config-profile-switch" aria-label="Client configuration profile">
+                  <button type="button" data-config-profile="0" aria-pressed="true">Fake IP <small>0</small></button>
+                  <button type="button" data-config-profile="1" aria-pressed="false">Redir host <small>1</small></button>
+                </div>
+                <button class="button button-primary" id="save-client-config">
+                  Save client configuration
+                </button>
+              </div>
             </div>
             <div class="client-config-layout">
               <form class="panel client-config-form" id="client-config-form">
+                <input name="dnsEnhancedMode" type="hidden" value="fake-ip" />
                 <section class="client-config-section">
                   <h2>Network</h2>
                   <div class="settings-grid">
@@ -640,22 +653,16 @@
                 </section>
                 <section class="client-config-section">
                   <h2>DNS policy</h2>
-                  <p>
+                  <p id="dns-policy-description">
                     Redir host sends Chinese domains only to domestic DNS and
                     all other domains through the selected proxy group.
                   </p>
                   <div class="settings-grid">
-                    <label
-                      >Enhanced mode<select name="dnsEnhancedMode">
-                        <option value="redir-host">Redir host</option>
-                        <option value="fake-ip">Fake IP</option>
-                        <option value="normal">Normal</option>
-                      </select></label
-                    ><label
+                    <label data-config-profile-only="1"
                       >Overseas DNS proxy group<select name="dnsPolicyGroupId">
                         <option value="0">Choose a proxy group</option>
                       </select></label
-                    ><label
+                    ><label data-config-profile-only="0"
                       >Fake IP range<input name="dnsFakeIPRange" /><span
                         class="field-hint"
                         >Used only in Fake IP mode.</span
@@ -668,7 +675,7 @@
                       ><span class="field-hint"
                         >IP resolvers used to bootstrap encrypted DNS.</span
                       ></label
-                    ><label class="field-span-2"
+                    ><label class="field-span-2" data-config-profile-only="0"
                       >Fake IP filter (blacklist)<textarea
                         name="dnsFakeIPFilter"
                         rows="6"
@@ -716,10 +723,10 @@
                     ></label>
                   </div>
                 </section>
-                <section class="client-config-section">
-                  <h2>Legacy fallback controls</h2>
+                <section class="client-config-section" data-config-profile-only="0">
+                  <h2>Fake IP fallback controls</h2>
                   <p>
-                    These apply only when Redir host DNS policy is not active.
+                    These are emitted only in the Fake IP profile.
                   </p>
                   <div class="settings-grid">
                     <label class="field-span-2"

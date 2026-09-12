@@ -2921,7 +2921,17 @@ func (a *App) handleAccessKeyAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) handleConfigPreview(w http.ResponseWriter, r *http.Request) {
-	writeYAML(w, a.generateConfig())
+	profile := r.URL.Query().Get("profile")
+	if profile == "" {
+		writeYAML(w, a.generateConfig())
+		return
+	}
+	config, ok := a.generateConfigForProfile(profile)
+	if !ok {
+		writeError(w, http.StatusBadRequest, "Config profile must be 0 (Fake IP) or 1 (Redir host)")
+		return
+	}
+	writeYAML(w, config)
 }
 
 func validClashMode(value string) bool {
@@ -3071,7 +3081,32 @@ func writeSubscriptionProxy(b *strings.Builder, proxy map[string]any) {
 		}
 	}
 }
+func enhancedModeForProfile(profile string) (string, bool) {
+	switch profile {
+	case "0":
+		return "fake-ip", true
+	case "1":
+		return "redir-host", true
+	default:
+		return "", false
+	}
+}
+
+func (a *App) generateConfigForProfile(profile string) (string, bool) {
+	enhancedMode, ok := enhancedModeForProfile(profile)
+	if !ok {
+		return "", false
+	}
+	return a.generateConfigWithEnhancedMode(enhancedMode), true
+}
+
+// generateConfig preserves the unsuffixed subscription behavior for existing
+// clients. New numbered profile URLs use generateConfigForProfile instead.
 func (a *App) generateConfig() string {
+	return a.generateConfigWithEnhancedMode("")
+}
+
+func (a *App) generateConfigWithEnhancedMode(enhancedMode string) string {
 	proxies := a.allProxies()
 	importedProxyConfigs := a.subscriptionConfigProxies()
 	rules := a.listRules()
@@ -3080,6 +3115,9 @@ func (a *App) generateConfig() string {
 	subscriptions := a.listSubscriptions()
 	ruleProviders := a.listRuleProviders()
 	client := a.settings()
+	if enhancedMode != "" {
+		client.DNSEnhancedMode = enhancedMode
+	}
 	dnsPolicyGroup := ""
 	for _, group := range groups {
 		if group.Enabled && group.ID == client.DNSPolicyGroupID {
@@ -3252,11 +3290,25 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		http.NotFound(w, r)
 		return
 	}
+	parts := strings.Split(raw, "/")
+	if len(parts) > 2 || parts[0] == "" {
+		http.NotFound(w, r)
+		return
+	}
+	key := parts[0]
+	profile := ""
+	if len(parts) == 2 {
+		profile = parts[1]
+		if _, ok := enhancedModeForProfile(profile); !ok {
+			http.NotFound(w, r)
+			return
+		}
+	}
 	var id int64
 	var enabled int
 	var monthlyDataGB float64
 	var usageSubscriptionID int64
-	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb,COALESCE(usage_subscription_id,0) FROM access_keys WHERE key_hash=?`, hashToken(raw)).Scan(&id, &enabled, &monthlyDataGB, &usageSubscriptionID)
+	err := a.db.QueryRow(`SELECT id,enabled,monthly_data_gb,COALESCE(usage_subscription_id,0) FROM access_keys WHERE key_hash=?`, hashToken(key)).Scan(&id, &enabled, &monthlyDataGB, &usageSubscriptionID)
 	if err != nil || enabled != 1 {
 		http.NotFound(w, r)
 		return
@@ -3287,7 +3339,13 @@ func (a *App) handlePublicSubscription(w http.ResponseWriter, r *http.Request) {
 		w.Header().Set("Subscription-Userinfo", fmt.Sprintf("upload=0; download=0; total=%d; expire=%d", gigabytesToBytes(monthlyDataGB), nextMonth.Unix()))
 	}
 	w.WriteHeader(200)
-	_, _ = io.WriteString(w, a.generateConfig())
+	var config string
+	if profile == "" {
+		config = a.generateConfig()
+	} else {
+		config, _ = a.generateConfigForProfile(profile)
+	}
+	_, _ = io.WriteString(w, config)
 }
 
 func gigabytesToBytes(value float64) uint64 {
