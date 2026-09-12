@@ -346,9 +346,10 @@
               </form>
               <p id="rule-lookup-result" role="status" aria-live="polite"></p>
               <form id="rule-override-form" class="rule-lookup-controls" hidden>
+                <label>Match type<select id="rule-override-type" required></select></label>
                 <label>Override destination<select id="rule-override-target" required></select></label>
                 <button class="button button-primary" type="submit">Save override</button>
-                <p>Applies to this exact domain or IP, before ordinary and service rules. Overrides stay first when rules are reordered. Edit or delete it in the list below. Refresh your client subscription to apply changes.</p>
+                <p>Applies the selected match type before ordinary and service rules. Overrides stay first when rules are reordered. Edit or delete it in the list below. Refresh your client subscription to apply changes.</p>
               </form>
             </div>
             <div class="panel service-rule-panel">

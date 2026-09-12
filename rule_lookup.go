@@ -219,6 +219,7 @@ func (a *App) handleRuleOverride(w http.ResponseWriter, r *http.Request) {
 	var input struct {
 		Destination string `json:"destination"`
 		Target      string `json:"target"`
+		RuleType    string `json:"ruleType"`
 	}
 	if !decodeJSON(w, r, &input) {
 		return
@@ -228,7 +229,7 @@ func (a *App) handleRuleOverride(w http.ResponseWriter, r *http.Request) {
 		writeError(w, 400, err.Error())
 		return
 	}
-	rule := routingRule{RuleType: "DOMAIN", Match: destination, Target: input.Target, Enabled: true}
+	rule := routingRule{Match: destination, Target: input.Target, Enabled: true}
 	if ip, err := netip.ParseAddr(destination); err == nil {
 		rule.RuleType = "IP-CIDR"
 		bits := 32
@@ -237,6 +238,19 @@ func (a *App) handleRuleOverride(w http.ResponseWriter, r *http.Request) {
 			bits = 128
 		}
 		rule.Match = fmt.Sprintf("%s/%d", destination, bits)
+		if input.RuleType != "" && !strings.EqualFold(input.RuleType, rule.RuleType) {
+			writeError(w, 400, "The selected match type is not valid for this IP address")
+			return
+		}
+	} else {
+		rule.RuleType = strings.ToUpper(strings.TrimSpace(input.RuleType))
+		if rule.RuleType == "" {
+			rule.RuleType = "DOMAIN"
+		}
+		if rule.RuleType != "DOMAIN" && rule.RuleType != "DOMAIN-SUFFIX" && rule.RuleType != "DOMAIN-KEYWORD" {
+			writeError(w, 400, "Match type must be DOMAIN, DOMAIN-SUFFIX, or DOMAIN-KEYWORD")
+			return
+		}
 	}
 	if err := a.resolveRuleTarget(&rule); err != nil {
 		writeError(w, 400, err.Error())

@@ -953,6 +953,10 @@ $('#rule-lookup-form').addEventListener('submit', async (event) => {
     $('#rule-lookup-result').textContent = modeNote + (result.certain
       ? `${result.destination} → ${result.target}. Matched: ${result.rule}.${providerNote}`
       : `${result.destination}: routing is uncertain. First known match: ${result.target} (${result.rule}).${providerNote} Earlier rules require runtime data or a readable provider cache: ${result.unresolved.join('; ')}`);
+    const isIP = result.destination.includes(':') || /^(?:\d{1,3}\.){3}\d{1,3}$/.test(result.destination);
+    $('#rule-override-type').innerHTML = isIP
+      ? `<option value="${result.destination.includes(':') ? 'IP-CIDR6' : 'IP-CIDR'}">Exact IP</option>`
+      : '<option value="DOMAIN">Exact domain</option><option value="DOMAIN-SUFFIX">Domain suffix</option><option value="DOMAIN-KEYWORD">Domain keyword</option>';
     $('#rule-override-target').innerHTML = '<option value="DIRECT">DIRECT</option><option value="REJECT">REJECT</option>' + (state.groups || []).filter((group) => group.enabled).map((group) => `<option value="group-id:${group.id}">${escapeHTML(group.name)}</option>`).join('');
     const choice = Array.from($('#rule-override-target').options).find((option) => option.textContent === result.target);
     if (choice) $('#rule-override-target').value = choice.value;
@@ -969,10 +973,11 @@ $('#rule-override-form').addEventListener('submit', async (event) => {
   button.textContent = 'Saving…';
   $('#rule-lookup-input').disabled = true;
   $('#rule-lookup-form button').disabled = true;
+  $('#rule-override-type').disabled = true;
   $('#rule-override-target').disabled = true;
   let saved = false;
   try {
-    await api('/api/rules/override', { method: 'POST', body: JSON.stringify({ destination: lookupDestination, target: $('#rule-override-target').value }) });
+    await api('/api/rules/override', { method: 'POST', body: JSON.stringify({ destination: lookupDestination, ruleType: $('#rule-override-type').value, target: $('#rule-override-target').value }) });
     saved = true;
     await refreshWorkspace();
     showNotice('Override saved', 'Refresh your client subscription to apply the new routing rule.');
@@ -985,6 +990,7 @@ $('#rule-override-form').addEventListener('submit', async (event) => {
     button.textContent = 'Save override';
     $('#rule-lookup-input').disabled = false;
     $('#rule-lookup-form button').disabled = false;
+    $('#rule-override-type').disabled = false;
     $('#rule-override-target').disabled = false;
   }
   if (saved) $('#rule-lookup-form').requestSubmit();

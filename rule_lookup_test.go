@@ -306,3 +306,37 @@ func TestOverrideInvalidTargetsAndIP(t *testing.T) {
 		}
 	}
 }
+
+func TestOverrideSupportsDomainMatchTypes(t *testing.T) {
+	a := testApp(t)
+	for _, tc := range []struct {
+		ruleType string
+		want     string
+	}{
+		{ruleType: "DOMAIN", want: "DOMAIN,piwheels.org,DIRECT"},
+		{ruleType: "DOMAIN-SUFFIX", want: "DOMAIN-SUFFIX,piwheels.org,DIRECT"},
+		{ruleType: "DOMAIN-KEYWORD", want: "DOMAIN-KEYWORD,piwheels.org,DIRECT"},
+	} {
+		body := fmt.Sprintf(`{"destination":"Piwheels.ORG.","ruleType":%q,"target":"DIRECT"}`, tc.ruleType)
+		w := httptest.NewRecorder()
+		a.handleRuleOverride(w, httptest.NewRequest(http.MethodPost, "/api/rules/override", strings.NewReader(body)))
+		if w.Code != http.StatusCreated {
+			t.Fatalf("%s returned %d: %s", tc.ruleType, w.Code, w.Body.String())
+		}
+		if config := a.generateConfig(); !strings.Contains(config, "  - "+tc.want+"\n") {
+			t.Fatalf("generated config is missing %q", tc.want)
+		}
+	}
+
+	for _, body := range []string{
+		`{"destination":"piwheels.org","ruleType":"IP-CIDR","target":"DIRECT"}`,
+		`{"destination":"192.0.2.1","ruleType":"DOMAIN-SUFFIX","target":"DIRECT"}`,
+		`{"destination":"2001:db8::1","ruleType":"IP-CIDR","target":"DIRECT"}`,
+	} {
+		w := httptest.NewRecorder()
+		a.handleRuleOverride(w, httptest.NewRequest(http.MethodPost, "/api/rules/override", strings.NewReader(body)))
+		if w.Code != http.StatusBadRequest {
+			t.Fatalf("invalid match type returned %d: %s", w.Code, w.Body.String())
+		}
+	}
+}
