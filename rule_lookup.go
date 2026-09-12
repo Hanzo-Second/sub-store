@@ -184,13 +184,19 @@ func (a *App) handleRuleLookup(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	unresolved := []string{}
-	for _, rule := range orderedRoutingRules(a.listRules(), a.listServiceRuleGroups()) {
+	settings := a.settings()
+	groups := a.listGroups()
+	for _, rule := range effectiveRoutingRules(a.listRules(), a.listServiceRuleGroups(), a.listRuleProviders(), settings.RoutingMode, routingProxyGroupName(settings, groups)) {
 		parts := strings.Split(rule.value, ",")
 		if len(parts) < 2 {
 			unresolved = append(unresolved, rule.value)
 			continue
 		}
 		target := parts[len(parts)-1]
+		if strings.EqualFold(parts[0], "MATCH") {
+			writeJSON(w, 200, map[string]any{"destination": destination, "target": target, "rule": rule.value, "certain": len(unresolved) == 0, "unresolved": unresolved})
+			return
+		}
 		matched, known := destinationMatch(parts[0], parts[1], destination)
 		providerRule := ""
 		if strings.EqualFold(parts[0], "RULE-SET") {

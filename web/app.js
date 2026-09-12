@@ -821,7 +821,52 @@ function renderClientConfig(settings) {
   const selectedGroup = (state.groups || []).find((group) => String(group.id) === String(settings.dnsPolicyGroupId));
   const rows = [['Profile', `${CONFIG_PROFILES[selectedConfigProfile].label} (${selectedConfigProfile})`], ['Mixed port', settings.mixedPort], ['Allow LAN', settings.allowLan ? 'Enabled' : 'Disabled'], ['Mode', settings.mode], ['DNS', settings.dnsEnabled ? `${CONFIG_PROFILES[selectedConfigProfile].enhancedMode} enabled` : 'Disabled'], ['Domestic DNS', settings.dnsNameservers], ['Overseas DNS via', selectedConfigProfile === '1' ? selectedGroup?.name || 'Not configured' : 'Not used']];
   $('#client-config-summary').innerHTML = rows.map(([name, value]) => `<div><dt>${escapeHTML(name)}</dt><dd title="${escapeHTML(value)}">${escapeHTML(value)}</dd></div>`).join('');
+	 renderRoutingMode(settings);
 }
+
+function syncRoutingMode(mode) {
+  const selected = mode === 'whitelist' ? 'whitelist' : 'blacklist';
+  const form = $('#routing-mode-form');
+  if (!form) return;
+  form.elements.routingMode.value = selected;
+  $$('[data-routing-mode]').forEach((button) => {
+    const active = button.dataset.routingMode === selected;
+    button.classList.toggle('active', active);
+    button.setAttribute('aria-pressed', String(active));
+  });
+  $('#routing-mode-description').textContent = selected === 'whitelist'
+    ? 'Whitelist mode sends unmatched traffic through the selected proxy group. Local, private, and mainland destinations stay direct.'
+    : 'Blacklist mode proxies only destinations matched by tld-not-cn, GFW, or Telegram rules. Unmatched traffic goes direct.';
+}
+
+function renderRoutingMode(settings) {
+  const form = $('#routing-mode-form');
+  if (!form) return;
+  const groups = (state.groups || []).filter((group) => group.enabled);
+  form.elements.routingProxyGroupId.innerHTML = groups.length
+    ? groups.map((group) => `<option value="${group.id}">${escapeHTML(group.name)}</option>`).join('')
+    : '<option value="0">Automatic PROXY group</option>';
+  const configured = groups.find((group) => String(group.id) === String(settings.routingProxyGroupId));
+  form.elements.routingProxyGroupId.value = configured ? String(configured.id) : String(groups[0]?.id || 0);
+  syncRoutingMode(settings.routingMode);
+}
+
+$$('[data-routing-mode]').forEach((button) => button.addEventListener('click', () => syncRoutingMode(button.dataset.routingMode)));
+$('#routing-mode-form').addEventListener('submit', async (event) => {
+  event.preventDefault();
+  const button = event.currentTarget.querySelector('button[type="submit"]');
+  const data = Object.fromEntries(new FormData(event.currentTarget));
+  data.routingProxyGroupId = Number(data.routingProxyGroupId);
+  button.disabled = true;
+  try {
+    state.settings = await api('/api/settings', { method: 'PATCH', body: JSON.stringify({ ...state.settings, ...data }) });
+    renderRoutingMode(state.settings);
+    await refreshConfig();
+    resetRuleLookup();
+    showNotice('Routing mode saved', 'Generated YAML and rule search now use the selected routing policy.');
+  } catch (error) { showRequestError(error); }
+  finally { button.disabled = false; }
+});
 $('#client-config-form').addEventListener('change', (event) => { if (event.target.name !== 'groupLayout') return; localStorage.setItem('substore-group-layout', event.target.value); renderGroups(state.groups); });
 $$('[data-config-profile]').forEach((button) => button.addEventListener('click', () => selectConfigProfile(button.dataset.configProfile)));
 syncConfigProfileControls();

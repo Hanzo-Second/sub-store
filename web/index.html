@@ -337,6 +337,21 @@
                 <span>+</span> Add rule
               </button>
             </div>
+            <form class="panel routing-mode-panel" id="routing-mode-form">
+              <div>
+                <h2>Routing mode</h2>
+                <p id="routing-mode-description">Blacklist mode proxies only matched destinations and sends unmatched traffic direct.</p>
+              </div>
+              <div class="routing-mode-controls">
+                <div class="config-profile-switch" aria-label="Routing mode">
+                  <button type="button" data-routing-mode="blacklist" aria-pressed="true">Blacklist</button>
+                  <button type="button" data-routing-mode="whitelist" aria-pressed="false">Whitelist</button>
+                </div>
+                <input type="hidden" name="routingMode" value="blacklist" />
+                <label>Proxy destination<select name="routingProxyGroupId" required></select></label>
+                <button class="button button-primary" type="submit">Save routing mode</button>
+              </div>
+            </form>
             <div class="panel rule-lookup-panel">
               <h2>Rule search</h2>
               <p>Preview rule-mode routing for a domain or IP. Searches inline rules and every referenced YAML or text rule provider, downloading a missing provider cache automatically. MRS, client DNS, and GEOIP data are reported as uncertain when they cannot be evaluated here.</p>

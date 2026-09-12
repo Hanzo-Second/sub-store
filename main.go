@@ -113,6 +113,8 @@ type settingsPayload struct {
 	BindAddress           string `json:"bindAddress"`
 	Mode                  string `json:"mode"`
 	LogLevel              string `json:"logLevel"`
+	RoutingMode           string `json:"routingMode"`
+	RoutingProxyGroupID   int64  `json:"routingProxyGroupId"`
 	DNSEnabled            bool   `json:"dnsEnabled"`
 	DNSIPv6               bool   `json:"dnsIPv6"`
 	DNSEnhancedMode       string `json:"dnsEnhancedMode"`
@@ -404,7 +406,7 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 	if err := a.backfillRuleGroupReferences(); err != nil {
 		return err
 	}
-	defaults := map[string]string{"port": "8080", "base_url": "http://localhost:8080", "default_user_agent": defaultUA, "scheduler_enabled": "true", "default_interval": "1440", "dns_fake_ip_filter": defaultDNSFakeIPFilter}
+	defaults := map[string]string{"port": "8080", "base_url": "http://localhost:8080", "default_user_agent": defaultUA, "scheduler_enabled": "true", "default_interval": "1440", "routing_mode": "blacklist", "routing_proxy_group_id": "0", "dns_fake_ip_filter": defaultDNSFakeIPFilter}
 	for key, value := range defaults {
 		_, err = a.db.Exec(`INSERT OR IGNORE INTO settings(key,value) VALUES(?,?)`, key, value)
 		if err != nil {
@@ -427,6 +429,9 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 		return err
 	}
 	if err := a.seedTailscaleRouting(); err != nil {
+		return err
+	}
+	if err := a.seedLoyalsoldierRoutingProviders(); err != nil {
 		return err
 	}
 	if err := a.migrateAppleIntelligenceTextRules(); err != nil {
@@ -564,6 +569,60 @@ func (a *App) seedTailscaleRouting() error {
 			return err
 		}
 		if _, err = tx.Exec(`INSERT INTO rules(rule_type,match_value,target,target_group_id,priority,enabled,created_at) VALUES(?,?,?,?,?,1,?)`, rule.ruleType, rule.match, rule.target, rule.targetGroupID, rule.priority, time.Now().UTC().Format(time.RFC3339)); err != nil {
+			return err
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
+}
+
+// seedLoyalsoldierRoutingProviders installs the provider set used by the
+// selectable whitelist and blacklist routing modes. Providers with matching
+// names are left untouched so existing URLs and user edits remain authoritative.
+func (a *App) seedLoyalsoldierRoutingProviders() error {
+	const migrationKey = "migration_loyalsoldier_routing_providers_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+	type definition struct {
+		name     string
+		behavior string
+	}
+	providers := []definition{
+		{name: "applications", behavior: "classical"},
+		{name: "private", behavior: "domain"},
+		{name: "reject", behavior: "domain"},
+		{name: "icloud", behavior: "domain"},
+		{name: "apple", behavior: "domain"},
+		{name: "google", behavior: "domain"},
+		{name: "proxy", behavior: "domain"},
+		{name: "direct", behavior: "domain"},
+		{name: "tld-not-cn", behavior: "domain"},
+		{name: "gfw", behavior: "domain"},
+		{name: "lancidr", behavior: "ipcidr"},
+		{name: "cncidr", behavior: "ipcidr"},
+		{name: "telegramcidr", behavior: "ipcidr"},
+	}
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+	now := time.Now().UTC().Format(time.RFC3339)
+	for _, provider := range providers {
+		var count int
+		if err = tx.QueryRow(`SELECT COUNT(*) FROM rule_providers WHERE LOWER(name)=LOWER(?)`, provider.name).Scan(&count); err != nil {
+			return err
+		}
+		if count > 0 {
+			continue
+		}
+		primaryURL := "https://cdn.jsdelivr.net/gh/Loyalsoldier/clash-rules@release/" + provider.name + ".txt"
+		backupURL := "https://raw.githubusercontent.com/Loyalsoldier/clash-rules/release/" + provider.name + ".txt"
+		if _, err = tx.Exec(`INSERT INTO rule_providers(name,provider_type,behavior,provider_format,primary_url,backup_url,path,enabled,update_mode,interval_minutes,created_at) VALUES(?,'http',?,'text',?,?,?,?, 'manual',86400,?)`, provider.name, provider.behavior, primaryURL, backupURL, defaultRuleProviderPath(provider.name), 1, now); err != nil {
 			return err
 		}
 	}
@@ -1137,7 +1196,7 @@ func (a *App) migrateLegacyGroupReferences() error {
 }
 
 func (a *App) settings() settingsPayload {
-	result := settingsPayload{Port: defaultPort, BaseURL: "http://localhost:8080", DefaultUserAgent: defaultUA, SchedulerEnabled: true, DefaultInterval: 1440, MixedPort: 7890, AllowLAN: false, BindAddress: "*", Mode: "rule", LogLevel: "info", DNSEnabled: true, DNSIPv6: false, DNSEnhancedMode: "fake-ip", DNSFakeIPRange: "198.18.0.1/16", DNSFakeIPFilter: defaultDNSFakeIPFilter, DNSUseHosts: true, DNSDefaultNameservers: "223.5.5.5, 119.29.29.29", DNSNameservers: "https://doh.pub/dns-query, https://dns.alidns.com/dns-query", DNSFallback: "https://doh-pure.onedns.net/dns-query, https://ada.openbld.net/dns-query", DNSFallbackGeoIP: true, DNSFallbackIPCIDR: "240.0.0.0/4, 0.0.0.0/32"}
+	result := settingsPayload{Port: defaultPort, BaseURL: "http://localhost:8080", DefaultUserAgent: defaultUA, SchedulerEnabled: true, DefaultInterval: 1440, MixedPort: 7890, AllowLAN: false, BindAddress: "*", Mode: "rule", LogLevel: "info", RoutingMode: "blacklist", DNSEnabled: true, DNSIPv6: false, DNSEnhancedMode: "fake-ip", DNSFakeIPRange: "198.18.0.1/16", DNSFakeIPFilter: defaultDNSFakeIPFilter, DNSUseHosts: true, DNSDefaultNameservers: "223.5.5.5, 119.29.29.29", DNSNameservers: "https://doh.pub/dns-query, https://dns.alidns.com/dns-query", DNSFallback: "https://doh-pure.onedns.net/dns-query, https://ada.openbld.net/dns-query", DNSFallbackGeoIP: true, DNSFallbackIPCIDR: "240.0.0.0/4, 0.0.0.0/32"}
 	rows, err := a.db.Query(`SELECT key,value FROM settings`)
 	if err != nil {
 		return result
@@ -1169,6 +1228,10 @@ func (a *App) settings() settingsPayload {
 			result.Mode = value
 		case "log_level":
 			result.LogLevel = value
+		case "routing_mode":
+			result.RoutingMode = value
+		case "routing_proxy_group_id":
+			result.RoutingProxyGroupID, _ = strconv.ParseInt(value, 10, 64)
 		case "dns_enabled":
 			result.DNSEnabled = value == "true"
 		case "dns_ipv6":
@@ -1404,7 +1467,7 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 	if !decodeJSON(w, r, &input) {
 		return
 	}
-	if input.MixedPort < 1 || input.MixedPort > 65535 || !validClashMode(input.Mode) || !validLogLevel(input.LogLevel) || !validDNSEnhancedMode(input.DNSEnhancedMode) {
+	if input.MixedPort < 1 || input.MixedPort > 65535 || !validClashMode(input.Mode) || !validLogLevel(input.LogLevel) || !validDNSEnhancedMode(input.DNSEnhancedMode) || !validRoutingMode(input.RoutingMode) {
 		writeError(w, http.StatusBadRequest, "Invalid client configuration")
 		return
 	}
@@ -1415,7 +1478,14 @@ func (a *App) handleSettings(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 	}
-	values := map[string]string{"default_user_agent": strings.TrimSpace(input.DefaultUserAgent), "scheduler_enabled": strconv.FormatBool(input.SchedulerEnabled), "default_interval": strconv.Itoa(input.DefaultInterval), "mixed_port": strconv.Itoa(input.MixedPort), "allow_lan": strconv.FormatBool(input.AllowLAN), "bind_address": strings.TrimSpace(input.BindAddress), "mode": input.Mode, "log_level": input.LogLevel, "dns_enabled": strconv.FormatBool(input.DNSEnabled), "dns_ipv6": strconv.FormatBool(input.DNSIPv6), "dns_enhanced_mode": input.DNSEnhancedMode, "dns_fake_ip_range": strings.TrimSpace(input.DNSFakeIPRange), "dns_fake_ip_filter": strings.TrimSpace(input.DNSFakeIPFilter), "dns_use_hosts": strconv.FormatBool(input.DNSUseHosts), "dns_default_nameservers": strings.TrimSpace(input.DNSDefaultNameservers), "dns_nameservers": strings.TrimSpace(input.DNSNameservers), "dns_fallback": strings.TrimSpace(input.DNSFallback), "dns_policy_group_id": strconv.FormatInt(input.DNSPolicyGroupID, 10), "dns_fallback_geoip": strconv.FormatBool(input.DNSFallbackGeoIP), "dns_fallback_ipcidr": strings.TrimSpace(input.DNSFallbackIPCIDR)}
+	if input.RoutingProxyGroupID > 0 {
+		var count int
+		if err := a.db.QueryRow(`SELECT COUNT(*) FROM proxy_groups WHERE id=? AND enabled=1`, input.RoutingProxyGroupID).Scan(&count); err != nil || count != 1 {
+			writeError(w, http.StatusBadRequest, "Routing proxy group not found")
+			return
+		}
+	}
+	values := map[string]string{"default_user_agent": strings.TrimSpace(input.DefaultUserAgent), "scheduler_enabled": strconv.FormatBool(input.SchedulerEnabled), "default_interval": strconv.Itoa(input.DefaultInterval), "mixed_port": strconv.Itoa(input.MixedPort), "allow_lan": strconv.FormatBool(input.AllowLAN), "bind_address": strings.TrimSpace(input.BindAddress), "mode": input.Mode, "log_level": input.LogLevel, "routing_mode": input.RoutingMode, "routing_proxy_group_id": strconv.FormatInt(input.RoutingProxyGroupID, 10), "dns_enabled": strconv.FormatBool(input.DNSEnabled), "dns_ipv6": strconv.FormatBool(input.DNSIPv6), "dns_enhanced_mode": input.DNSEnhancedMode, "dns_fake_ip_range": strings.TrimSpace(input.DNSFakeIPRange), "dns_fake_ip_filter": strings.TrimSpace(input.DNSFakeIPFilter), "dns_use_hosts": strconv.FormatBool(input.DNSUseHosts), "dns_default_nameservers": strings.TrimSpace(input.DNSDefaultNameservers), "dns_nameservers": strings.TrimSpace(input.DNSNameservers), "dns_fallback": strings.TrimSpace(input.DNSFallback), "dns_policy_group_id": strconv.FormatInt(input.DNSPolicyGroupID, 10), "dns_fallback_geoip": strconv.FormatBool(input.DNSFallbackGeoIP), "dns_fallback_ipcidr": strings.TrimSpace(input.DNSFallbackIPCIDR)}
 	for key, value := range values {
 		_, _ = a.db.Exec(`INSERT INTO settings(key,value) VALUES(?,?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, key, value)
 	}
@@ -3012,6 +3082,9 @@ func validLogLevel(value string) bool {
 func validDNSEnhancedMode(value string) bool {
 	return value == "normal" || value == "fake-ip" || value == "redir-host"
 }
+func validRoutingMode(value string) bool {
+	return value == "blacklist" || value == "whitelist"
+}
 func configList(value string) []string {
 	items := strings.FieldsFunc(value, func(r rune) bool { return r == ',' || r == '\n' || r == '\r' })
 	result := make([]string, 0, len(items))
@@ -3277,11 +3350,11 @@ func (a *App) generateConfigWithEnhancedMode(enhancedMode string) string {
 		b.WriteString(fmt.Sprintf("  %q:\n    type: %s\n    behavior: %s\n    format: %s\n    url: %q\n    path: %s\n    interval: %d\n", provider.Name, provider.Type, provider.Behavior, provider.Format, provider.PrimaryURL, provider.Path, maxInt(provider.IntervalMinutes, 60)))
 	}
 	b.WriteString("\nrules:\n")
-	generatedRules := orderedRoutingRules(rules, serviceRuleGroups)
+	routingTarget := routingProxyGroupName(client, groups)
+	generatedRules := effectiveRoutingRules(rules, serviceRuleGroups, ruleProviders, client.RoutingMode, routingTarget)
 	for _, rule := range generatedRules {
 		b.WriteString("  - " + rule.value + "\n")
 	}
-	b.WriteString("  - MATCH,DIRECT\n")
 	return b.String()
 }
 
@@ -3554,4 +3627,82 @@ func orderedRoutingRules(rules []routingRule, serviceRuleGroups []serviceRuleGro
 		return generatedRules[i].priority < generatedRules[j].priority
 	})
 	return generatedRules
+}
+
+func routingProxyGroupName(settings settingsPayload, groups []proxyGroup) string {
+	for _, group := range groups {
+		if group.Enabled && settings.RoutingProxyGroupID > 0 && group.ID == settings.RoutingProxyGroupID {
+			return group.Name
+		}
+	}
+	for _, group := range groups {
+		if group.Enabled {
+			return group.Name
+		}
+	}
+	if len(groups) == 0 {
+		return "PROXY"
+	}
+	return ""
+}
+
+func effectiveRoutingRules(rules []routingRule, serviceRuleGroups []serviceRuleGroup, providers []ruleProvider, mode, proxyTarget string) []generatedRule {
+	result := []generatedRule{}
+	for _, rule := range orderedRoutingRules(rules, serviceRuleGroups) {
+		// Routing mode owns the single terminal fallback. Keeping an earlier
+		// stored MATCH would make the mode selector appear to save but have no
+		// effect on traffic.
+		if !strings.HasPrefix(strings.ToUpper(strings.TrimSpace(rule.value)), "MATCH,") {
+			result = append(result, rule)
+		}
+	}
+	enabledProviders := map[string]bool{}
+	for _, provider := range providers {
+		if provider.Enabled {
+			enabledProviders[strings.ToLower(strings.TrimSpace(provider.Name))] = true
+		}
+	}
+	appendRule := func(value string) {
+		result = append(result, generatedRule{priority: 1000, sequence: len(result), value: value})
+	}
+	appendProvider := func(name, target string) {
+		if enabledProviders[name] {
+			appendRule("RULE-SET," + name + "," + target)
+		}
+	}
+
+	appendProvider("applications", "DIRECT")
+	appendRule("DOMAIN,clash.razord.top,DIRECT")
+	appendRule("DOMAIN,yacd.haishan.me,DIRECT")
+	appendProvider("private", "DIRECT")
+	appendProvider("reject", "REJECT")
+	if mode == "whitelist" {
+		appendProvider("icloud", "DIRECT")
+		appendProvider("apple", "DIRECT")
+		if proxyTarget != "" {
+			appendProvider("google", proxyTarget)
+			appendProvider("proxy", proxyTarget)
+		}
+		appendProvider("direct", "DIRECT")
+		appendProvider("lancidr", "DIRECT")
+		appendProvider("cncidr", "DIRECT")
+		if proxyTarget != "" {
+			appendProvider("telegramcidr", proxyTarget)
+		}
+		appendRule("GEOIP,LAN,DIRECT")
+		appendRule("GEOIP,CN,DIRECT")
+		if proxyTarget != "" {
+			appendRule("MATCH," + proxyTarget)
+		} else {
+			appendRule("MATCH,DIRECT")
+		}
+		return result
+	}
+	if proxyTarget != "" {
+		appendProvider("tld-not-cn", proxyTarget)
+		appendProvider("gfw", proxyTarget)
+		appendProvider("telegramcidr", proxyTarget)
+	}
+	appendRule("MATCH,DIRECT")
+	return result
 }

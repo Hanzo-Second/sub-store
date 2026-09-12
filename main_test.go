@@ -60,6 +60,96 @@ func TestFrontendAssetsAreEmbedded(t *testing.T) {
 	}
 }
 
+func TestLoyalsoldierRoutingModesGenerateRecommendedOrder(t *testing.T) {
+	app := testApp(t)
+	result, err := app.db.Exec(`INSERT INTO proxy_groups(name,group_type,proxies_json,enabled,created_at) VALUES('Primary route','select','["DIRECT"]',1,'now')`)
+	if err != nil {
+		t.Fatal(err)
+	}
+	groupID, _ := result.LastInsertId()
+	if _, err = app.db.Exec(`INSERT INTO rules(rule_type,match_value,target,priority,enabled,created_at) VALUES('MATCH','legacy','REJECT',999,1,'now')`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err = app.db.Exec(`UPDATE settings SET value='whitelist' WHERE key='routing_mode'; UPDATE settings SET value=? WHERE key='routing_proxy_group_id'`, groupID); err != nil {
+		t.Fatal(err)
+	}
+
+	assertOrdered := func(config string, expected []string) {
+		t.Helper()
+		position := -1
+		for _, rule := range expected {
+			next := strings.Index(config[position+1:], "  - "+rule+"\n")
+			if next < 0 {
+				t.Fatalf("generated config is missing ordered rule %q:\n%s", rule, config)
+			}
+			position += next + 1
+		}
+	}
+	whitelist := app.generateConfig()
+	if strings.Count(whitelist, "\n  - MATCH,") != 1 || strings.Contains(whitelist, "MATCH,legacy,REJECT") {
+		t.Fatalf("whitelist mode did not own the terminal fallback:\n%s", whitelist)
+	}
+	assertOrdered(whitelist, []string{
+		"RULE-SET,applications,DIRECT",
+		"DOMAIN,clash.razord.top,DIRECT",
+		"DOMAIN,yacd.haishan.me,DIRECT",
+		"RULE-SET,private,DIRECT",
+		"RULE-SET,reject,REJECT",
+		"RULE-SET,icloud,DIRECT",
+		"RULE-SET,apple,DIRECT",
+		"RULE-SET,google,Primary route",
+		"RULE-SET,proxy,Primary route",
+		"RULE-SET,direct,DIRECT",
+		"RULE-SET,lancidr,DIRECT",
+		"RULE-SET,cncidr,DIRECT",
+		"RULE-SET,telegramcidr,Primary route",
+		"GEOIP,LAN,DIRECT",
+		"GEOIP,CN,DIRECT",
+		"MATCH,Primary route",
+	})
+
+	if _, err = app.db.Exec(`UPDATE proxy_groups SET name='Renamed route' WHERE id=?; UPDATE settings SET value='blacklist' WHERE key='routing_mode'`, groupID); err != nil {
+		t.Fatal(err)
+	}
+	blacklist := app.generateConfig()
+	if strings.Count(blacklist, "\n  - MATCH,") != 1 || strings.Contains(blacklist, "MATCH,legacy,REJECT") {
+		t.Fatalf("blacklist mode did not own the terminal fallback:\n%s", blacklist)
+	}
+	assertOrdered(blacklist, []string{
+		"RULE-SET,applications,DIRECT",
+		"DOMAIN,clash.razord.top,DIRECT",
+		"DOMAIN,yacd.haishan.me,DIRECT",
+		"RULE-SET,private,DIRECT",
+		"RULE-SET,reject,REJECT",
+		"RULE-SET,tld-not-cn,Renamed route",
+		"RULE-SET,gfw,Renamed route",
+		"RULE-SET,telegramcidr,Renamed route",
+		"MATCH,DIRECT",
+	})
+	if strings.Contains(blacklist, "RULE-SET,proxy,Renamed route") {
+		t.Fatal("blacklist mode unexpectedly included the whitelist proxy provider")
+	}
+}
+
+func TestLoyalsoldierProviderMigrationPreservesExistingProvider(t *testing.T) {
+	app := testApp(t)
+	const customURL = "https://rules.example/gfw.txt"
+	if _, err := app.db.Exec(`UPDATE rule_providers SET primary_url=? WHERE name='gfw'; DELETE FROM settings WHERE key='migration_loyalsoldier_routing_providers_v1'`, customURL); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.seedLoyalsoldierRoutingProviders(); err != nil {
+		t.Fatal(err)
+	}
+	var count int
+	var url string
+	if err := app.db.QueryRow(`SELECT COUNT(*),MAX(primary_url) FROM rule_providers WHERE LOWER(name)='gfw'`).Scan(&count, &url); err != nil {
+		t.Fatal(err)
+	}
+	if count != 1 || url != customURL {
+		t.Fatalf("provider migration returned count %d and URL %q", count, url)
+	}
+}
+
 func TestNTPDirectRoutingMigration(t *testing.T) {
 	app := testApp(t)
 	var target string

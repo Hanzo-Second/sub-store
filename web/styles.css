@@ -4458,6 +4458,12 @@ input[type="url"],
   }
 }
 
+.routing-mode-panel { display: flex; align-items: end; justify-content: space-between; gap: 24px; padding: 24px; margin-bottom: 24px; }
+.routing-mode-panel > div:first-child { max-width: 620px; }
+.routing-mode-panel h2 { margin-bottom: 6px; }
+.routing-mode-controls { display: flex; align-items: end; justify-content: flex-end; gap: 12px; flex-wrap: wrap; }
+.routing-mode-controls label { display: grid; gap: 8px; min-width: 190px; }
+.routing-mode-controls select { width: 100%; padding: 10px 12px; border: 1px solid var(--line, #dde2e8); border-radius: 8px; background: var(--bg); color: inherit; }
 .rule-lookup-panel { padding: 24px; margin-bottom: 24px; }
 .rule-lookup-controls { display: flex; gap: 16px; align-items: end; flex-wrap: wrap; margin-top: 16px; }
 .rule-lookup-controls[hidden] { display: none; }
@@ -4465,4 +4471,5 @@ input[type="url"],
 .rule-lookup-controls input, .rule-lookup-controls select { width: 100%; padding: 12px; border: 1px solid var(--line, #dde2e8); border-radius: 8px; background: var(--bg); color: inherit; }
 .rule-lookup-controls p { flex-basis: 100%; }
 #rule-lookup-result { overflow-wrap: anywhere; }
+@media (max-width: 760px) { .routing-mode-panel, .routing-mode-controls { flex-direction: column; align-items: stretch; } }
 @media (max-width: 600px) { .rule-lookup-controls { flex-direction: column; align-items: stretch; } }
