@@ -155,10 +155,10 @@ function renderConfigSectionMenu(sections) {
 }
 
 function scrollToConfigSection(section) {
-  const scroller = $('.page-body');
+  const scroller = $('#view-config pre');
   const target = $(`#config-section-${section}`);
   if (!scroller || !target) return;
-  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 22;
+  const top = target.getBoundingClientRect().top - scroller.getBoundingClientRect().top + scroller.scrollTop - 16;
   scroller.scrollTo({ top, behavior: 'smooth' });
 }
 

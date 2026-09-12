@@ -42,14 +42,41 @@ const defaultDNSFakeIPFilter = `*.ntp.org
 *.pool.ntp.org
 pool.ntp.org
 *.debian.pool.ntp.org
+*.ubuntu.pool.ntp.org
+ntp.ubuntu.com
+*.ntp.ubuntu.com
+ntp-bootstrap.ubuntu.com
 time.apple.com
 time.google.com
+time1.google.com
+time2.google.com
+time3.google.com
+time4.google.com
+time.android.com
+time.windows.com
 time.cloudflare.com
+time.aws.com
+time.nist.gov
 ntp.aliyun.com
 ntp.tencent.com
 time1.cloud.tencent.com
 time.edu.cn
 time.neu.edu.cn`
+
+var additionalNTPFakeIPFilters = []string{
+	"*.ubuntu.pool.ntp.org",
+	"ntp.ubuntu.com",
+	"*.ntp.ubuntu.com",
+	"ntp-bootstrap.ubuntu.com",
+	"time1.google.com",
+	"time2.google.com",
+	"time3.google.com",
+	"time4.google.com",
+	"time.android.com",
+	"time.windows.com",
+	"time.aws.com",
+	"time.nist.gov",
+}
 
 // webAssets packages the frontend with the server so the binary can run from
 // any working directory without separate static files.
@@ -396,6 +423,9 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 	if err := a.seedNTPDirectRouting(); err != nil {
 		return err
 	}
+	if err := a.migrateAdditionalNTPFakeIPFilters(); err != nil {
+		return err
+	}
 	if err := a.seedTailscaleRouting(); err != nil {
 		return err
 	}
@@ -415,6 +445,45 @@ CREATE INDEX IF NOT EXISTS idx_subscription_usage_samples_source_time ON subscri
 		return err
 	}
 	return nil
+}
+
+// migrateAdditionalNTPFakeIPFilters adds common OS and public time services to
+// existing installations while preserving user-added filter entries.
+func (a *App) migrateAdditionalNTPFakeIPFilters() error {
+	const migrationKey = "migration_additional_ntp_fake_ip_filters_v1"
+	var completed string
+	if err := a.db.QueryRow(`SELECT value FROM settings WHERE key=?`, migrationKey).Scan(&completed); err == nil && completed == "true" {
+		return nil
+	}
+
+	tx, err := a.db.Begin()
+	if err != nil {
+		return err
+	}
+	defer tx.Rollback()
+
+	var raw string
+	if err = tx.QueryRow(`SELECT value FROM settings WHERE key='dns_fake_ip_filter'`).Scan(&raw); err != nil {
+		return err
+	}
+	items := configList(raw)
+	seen := make(map[string]bool, len(items)+len(additionalNTPFakeIPFilters))
+	for _, item := range items {
+		seen[strings.ToLower(item)] = true
+	}
+	for _, item := range additionalNTPFakeIPFilters {
+		if !seen[strings.ToLower(item)] {
+			items = append(items, item)
+			seen[strings.ToLower(item)] = true
+		}
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES('dns_fake_ip_filter',?) ON CONFLICT(key) DO UPDATE SET value=excluded.value`, strings.Join(items, "\n")); err != nil {
+		return err
+	}
+	if _, err = tx.Exec(`INSERT INTO settings(key,value) VALUES(?, 'true') ON CONFLICT(key) DO UPDATE SET value='true'`, migrationKey); err != nil {
+		return err
+	}
+	return tx.Commit()
 }
 
 // seedNTPDirectRouting keeps standard NTP traffic off proxy paths. Existing

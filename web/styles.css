@@ -978,10 +978,12 @@ body {
   display: grid;
   grid-template-columns: minmax(0, 1.5fr) minmax(280px, 0.65fr);
   gap: 18px;
-  max-height: calc(100vh - 302px);
+  height: max(520px, calc(100dvh - 302px));
   min-height: 0;
 }
 .config-preview {
+  display: flex;
+  flex-direction: column;
   overflow: hidden;
   background: #111a2b;
   border-color: #111a2b;
@@ -1009,11 +1011,13 @@ body {
   margin-right: 7px;
 }
 .config-preview pre {
+  flex: 1;
+  min-height: 0;
   font: 12px/1.8 var(--font-code);
   color: #bec9dc;
   padding: 21px 25px;
   margin: 0;
-  max-height: calc(100vh - 353px);
+  max-height: none;
   overflow-y: scroll;
   overflow-x: hidden;
   scrollbar-width: thin;
@@ -1369,6 +1373,7 @@ label select:focus {
   }
   .config-layout {
     grid-template-columns: 1fr;
+    height: auto;
     max-height: none;
     min-height: 0;
   }

@@ -791,6 +791,36 @@ func TestDefaultFakeIPFilterIsValidYAML(t *testing.T) {
 	}
 }
 
+func TestAdditionalNTPFakeIPFilterMigrationPreservesCustomEntries(t *testing.T) {
+	app := testApp(t)
+	if _, err := app.db.Exec(`DELETE FROM settings WHERE key='migration_additional_ntp_fake_ip_filters_v1'`); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := app.db.Exec(`UPDATE settings SET value=? WHERE key='dns_fake_ip_filter'`, "custom.time.example\nNTp.Ubuntu.com"); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.migrateAdditionalNTPFakeIPFilters(); err != nil {
+		t.Fatal(err)
+	}
+	if err := app.migrateAdditionalNTPFakeIPFilters(); err != nil {
+		t.Fatal(err)
+	}
+
+	items := configList(app.settings().DNSFakeIPFilter)
+	counts := map[string]int{}
+	for _, item := range items {
+		counts[strings.ToLower(item)]++
+	}
+	if counts["custom.time.example"] != 1 {
+		t.Fatalf("custom filter entry was not preserved exactly once: %v", items)
+	}
+	for _, want := range additionalNTPFakeIPFilters {
+		if counts[strings.ToLower(want)] != 1 {
+			t.Errorf("NTP filter %q count = %d, want 1", want, counts[strings.ToLower(want)])
+		}
+	}
+}
+
 func TestPreferredRoutingGroupOrderMigration(t *testing.T) {
 	app := testApp(t)
 	if _, err := app.db.Exec(`INSERT INTO subscriptions(name,url,user_agent,enabled,created_at) VALUES('光喵','https://cheap.example/sub','clash-meta',1,'now')`); err != nil {
