@@ -911,15 +911,16 @@ $('#rule-lookup-form').addEventListener('submit', async (event) => {
   const input = $('#rule-lookup-input').value;
   const button = event.target.querySelector('button');
   button.disabled = true;
-  $('#rule-lookup-result').textContent = 'Checking rules…';
+  $('#rule-lookup-result').textContent = 'Checking inline and provider rules…';
   try {
     const result = await api(`/api/rules/lookup?destination=${encodeURIComponent(input)}`);
     if (revision !== lookupRevision) return;
     lookupDestination = result.destination;
     const modeNote = state.settings?.mode && state.settings.mode !== 'rule' ? `Client mode is ${state.settings.mode}; these rules apply only in rule mode. ` : '';
+    const providerNote = result.providerRule ? ` Provider entry: ${result.providerRule}.` : '';
     $('#rule-lookup-result').textContent = modeNote + (result.certain
-      ? `${result.destination} → ${result.target}. Matched: ${result.rule}`
-      : `${result.destination}: routing is uncertain. First known match: ${result.target} (${result.rule}). Earlier rules require client data or an updated provider cache: ${result.unresolved.join('; ')}`);
+      ? `${result.destination} → ${result.target}. Matched: ${result.rule}.${providerNote}`
+      : `${result.destination}: routing is uncertain. First known match: ${result.target} (${result.rule}).${providerNote} Earlier rules require runtime data or a readable provider cache: ${result.unresolved.join('; ')}`);
     $('#rule-override-target').innerHTML = '<option value="DIRECT">DIRECT</option><option value="REJECT">REJECT</option>' + (state.groups || []).filter((group) => group.enabled).map((group) => `<option value="group-id:${group.id}">${escapeHTML(group.name)}</option>`).join('');
     const choice = Array.from($('#rule-override-target').options).find((option) => option.textContent === result.target);
     if (choice) $('#rule-override-target').value = choice.value;

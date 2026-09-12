@@ -3,6 +3,8 @@ package main
 import (
 	"encoding/json"
 	"fmt"
+	"io"
+	"net/http"
 	"net/http/httptest"
 	"strings"
 	"testing"
@@ -76,6 +78,89 @@ func TestProviderLookup(t *testing.T) {
 	}
 	if m, k := a.providerDestinationMatch("missing", "example.com"); m || k {
 		t.Fatal(m, k)
+	}
+}
+
+func TestLookupDownloadsAndChecksEveryReferencedProvider(t *testing.T) {
+	a := testApp(t)
+	if _, err := a.db.Exec(`DELETE FROM rules; DELETE FROM service_rule_groups; DELETE FROM rule_providers`); err != nil {
+		t.Fatal(err)
+	}
+	requests := map[string]int{}
+	a.ruleProviderClient = &http.Client{Transport: roundTripFunc(func(r *http.Request) (*http.Response, error) {
+		requests[r.URL.Path]++
+		body := ""
+		status := http.StatusOK
+		switch r.URL.Path {
+		case "/first":
+			body = "payload:\n  - '+.other.example'\n"
+		case "/second":
+			body = "payload:\n  - DOMAIN,unrelated.example\n  - DOMAIN-SUFFIX,example.com\n"
+		default:
+			status = http.StatusNotFound
+		}
+		return &http.Response{StatusCode: status, Header: make(http.Header), Body: io.NopCloser(strings.NewReader(body))}, nil
+	})}
+
+	for index, provider := range []struct{ name, path, behavior string }{
+		{name: "first-provider", path: "/first", behavior: "domain"},
+		{name: "second-provider", path: "/second", behavior: "classical"},
+	} {
+		if _, err := a.db.Exec(`INSERT INTO rule_providers(name,behavior,provider_format,primary_url,content,enabled,created_at) VALUES(?,?,'yaml',?,'',1,'now')`, provider.name, provider.behavior, "https://rules.example"+provider.path); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := a.db.Exec(`INSERT INTO rules(rule_type,match_value,target,priority,enabled,created_at) VALUES('RULE-SET',?,?,?,1,'now')`, provider.name, []string{"DIRECT", "REJECT"}[index], index+1); err != nil {
+			t.Fatal(err)
+		}
+	}
+
+	lookup := func() struct {
+		Target       string `json:"target"`
+		Rule         string `json:"rule"`
+		ProviderRule string `json:"providerRule"`
+		Certain      bool   `json:"certain"`
+	} {
+		w := httptest.NewRecorder()
+		a.handleRuleLookup(w, httptest.NewRequest("GET", "/api/rules/lookup?destination=www.example.com", nil))
+		if w.Code != http.StatusOK {
+			t.Fatal(w.Body.String())
+		}
+		var result struct {
+			Target       string `json:"target"`
+			Rule         string `json:"rule"`
+			ProviderRule string `json:"providerRule"`
+			Certain      bool   `json:"certain"`
+		}
+		if err := json.Unmarshal(w.Body.Bytes(), &result); err != nil {
+			t.Fatal(err)
+		}
+		return result
+	}
+
+	result := lookup()
+	if !result.Certain || result.Target != "REJECT" || result.Rule != "RULE-SET,second-provider,REJECT" || result.ProviderRule != "DOMAIN-SUFFIX,example.com" {
+		t.Fatalf("unexpected provider lookup: %+v", result)
+	}
+	if requests["/first"] != 1 || requests["/second"] != 1 {
+		t.Fatalf("did not download every provider required by rule order: %+v", requests)
+	}
+	result = lookup()
+	if !result.Certain || requests["/first"] != 1 || requests["/second"] != 1 {
+		t.Fatalf("cached lookup fetched providers again: result=%+v requests=%+v", result, requests)
+	}
+}
+
+func TestProviderLookupSupportsRulesKeyAndDomainMatchers(t *testing.T) {
+	a := testApp(t)
+	content := "rules:\n  - DOMAIN-WILDCARD,api?.example.com\n  - DOMAIN-REGEX,^cdn[0-9]+\\.example\\.net$\n"
+	if _, err := a.db.Exec(`INSERT INTO rule_providers(name,behavior,provider_format,primary_url,content,enabled,created_at) VALUES('matcher-test','classical','yaml','https://example.com/rules',?,1,'now')`, content); err != nil {
+		t.Fatal(err)
+	}
+	for _, destination := range []string{"api1.example.com", "cdn42.example.net"} {
+		matched, known, providerRule := a.providerDestinationMatchDetail("MATCHER-TEST", destination)
+		if !matched || !known || providerRule == "" {
+			t.Fatalf("%s: matched=%v known=%v rule=%q", destination, matched, known, providerRule)
+		}
 	}
 }
 

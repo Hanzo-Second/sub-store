@@ -339,7 +339,7 @@
             </div>
             <div class="panel rule-lookup-panel">
               <h2>Rule search</h2>
-              <p>Preview rule-mode routing for a domain or IP. Uses cached provider lists; client DNS, GEOIP, and provider versions can affect the actual route.</p>
+              <p>Preview rule-mode routing for a domain or IP. Searches inline rules and every referenced YAML or text rule provider, downloading a missing provider cache automatically. MRS, client DNS, and GEOIP data are reported as uncertain when they cannot be evaluated here.</p>
               <form id="rule-lookup-form" class="rule-lookup-controls">
                 <label>Domain or IP<input id="rule-lookup-input" placeholder="example.com or 1.1.1.1" required maxlength="253" /></label>
                 <button class="button button-primary" type="submit">Search rules</button>

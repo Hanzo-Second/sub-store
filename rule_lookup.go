@@ -46,6 +46,20 @@ func destinationMatch(kind, value, destination string) (matched, known bool) {
 		return ipErr != nil && (destination == value || strings.HasSuffix(destination, "."+value)), true
 	case "DOMAIN-KEYWORD":
 		return ipErr != nil && strings.Contains(destination, value), true
+	case "DOMAIN-WILDCARD":
+		if ipErr == nil {
+			return false, true
+		}
+		return wildcardMatch(value, destination)
+	case "DOMAIN-REGEX":
+		if ipErr == nil {
+			return false, true
+		}
+		expression, err := regexp.Compile("(?i)" + strings.TrimSpace(value))
+		if err != nil {
+			return false, false
+		}
+		return expression.MatchString(destination), true
 	case "IP-CIDR", "IP-CIDR6":
 		if ipErr != nil {
 			return false, false
@@ -60,23 +74,68 @@ func destinationMatch(kind, value, destination string) (matched, known bool) {
 	}
 }
 
-func (a *App) providerDestinationMatch(name, destination string) (bool, bool) {
-	var behavior, format, content string
-	if err := a.db.QueryRow(`SELECT behavior,provider_format,COALESCE(content,'') FROM rule_providers WHERE name=? AND enabled=1`, name).Scan(&behavior, &format, &content); err != nil || content == "" || format == "mrs" {
+func wildcardMatch(pattern, value string) (bool, bool) {
+	var expression strings.Builder
+	expression.WriteByte('^')
+	for _, character := range pattern {
+		switch character {
+		case '*':
+			expression.WriteString(".*")
+		case '?':
+			expression.WriteByte('.')
+		default:
+			expression.WriteString(regexp.QuoteMeta(string(character)))
+		}
+	}
+	expression.WriteByte('$')
+	compiled, err := regexp.Compile("(?i)" + expression.String())
+	if err != nil {
 		return false, false
 	}
-	if format != "text" && format != "yaml" {
-		return false, false
-	}
+	return compiled.MatchString(value), true
+}
+
+func providerRuleLines(format, content string) ([]string, bool) {
 	lines := strings.Split(strings.TrimPrefix(content, "\ufeff"), "\n")
 	if format == "yaml" {
 		var payload struct {
 			Payload []string `yaml:"payload"`
+			Rules   []string `yaml:"rules"`
 		}
-		if yaml.Unmarshal([]byte(content), &payload) != nil || payload.Payload == nil {
-			return false, false
+		if yaml.Unmarshal([]byte(content), &payload) != nil || (payload.Payload == nil && payload.Rules == nil) {
+			return nil, false
 		}
-		lines = payload.Payload
+		lines = append(payload.Payload, payload.Rules...)
+	} else if format != "text" {
+		return nil, false
+	}
+	return lines, true
+}
+
+func (a *App) providerDestinationMatch(name, destination string) (bool, bool) {
+	matched, known, _ := a.providerDestinationMatchDetail(name, destination)
+	return matched, known
+}
+
+func (a *App) providerDestinationMatchDetail(name, destination string) (bool, bool, string) {
+	var id int64
+	var behavior, format, content string
+	if err := a.db.QueryRow(`SELECT id,LOWER(behavior),LOWER(provider_format),COALESCE(content,'') FROM rule_providers WHERE LOWER(name)=LOWER(?) AND enabled=1 ORDER BY id LIMIT 1`, strings.TrimSpace(name)).Scan(&id, &behavior, &format, &content); err != nil {
+		return false, false, ""
+	}
+	// Default providers start without a local snapshot. Fetch the referenced
+	// provider on first use so lookup actually checks its rules without making
+	// the user visit every provider card and click Update first.
+	if content == "" && format != "mrs" {
+		body, err := a.refreshRuleProvider(id)
+		if err != nil {
+			return false, false, ""
+		}
+		content = string(body)
+	}
+	lines, parsed := providerRuleLines(format, content)
+	if !parsed {
+		return false, false, ""
 	}
 	known := true
 	for _, line := range lines {
@@ -89,7 +148,7 @@ func (a *App) providerDestinationMatch(name, destination string) (bool, bool) {
 		case "domain":
 			matched, certain := providerDomainMatch(value, destination)
 			if matched {
-				return true, true
+				return true, true, line
 			}
 			known = known && certain
 			continue
@@ -103,15 +162,15 @@ func (a *App) providerDestinationMatch(name, destination string) (bool, bool) {
 			}
 			kind, value = parts[0], parts[1]
 		default:
-			return false, false
+			return false, false, ""
 		}
 		matched, certain := destinationMatch(kind, value, destination)
 		if matched {
-			return true, true
+			return true, true, line
 		}
 		known = known && certain
 	}
-	return false, known
+	return false, known, ""
 }
 
 func (a *App) handleRuleLookup(w http.ResponseWriter, r *http.Request) {
@@ -133,14 +192,19 @@ func (a *App) handleRuleLookup(w http.ResponseWriter, r *http.Request) {
 		}
 		target := parts[len(parts)-1]
 		matched, known := destinationMatch(parts[0], parts[1], destination)
+		providerRule := ""
 		if strings.EqualFold(parts[0], "RULE-SET") {
-			matched, known = a.providerDestinationMatch(parts[1], destination)
+			matched, known, providerRule = a.providerDestinationMatchDetail(parts[1], destination)
 		}
 		if !known {
 			unresolved = append(unresolved, rule.value)
 		}
 		if matched {
-			writeJSON(w, 200, map[string]any{"destination": destination, "target": target, "rule": rule.value, "certain": len(unresolved) == 0, "unresolved": unresolved})
+			result := map[string]any{"destination": destination, "target": target, "rule": rule.value, "certain": len(unresolved) == 0, "unresolved": unresolved}
+			if providerRule != "" {
+				result["providerRule"] = providerRule
+			}
+			writeJSON(w, 200, result)
 			return
 		}
 	}

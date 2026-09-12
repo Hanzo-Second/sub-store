@@ -9,6 +9,7 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"io"
 	"io/fs"
@@ -60,6 +61,7 @@ type App struct {
 	db                   *sql.DB
 	static               http.Handler
 	subscriptionClient   *http.Client
+	ruleProviderClient   *http.Client
 	publicSubscriptionMu sync.Mutex
 }
 
@@ -2466,23 +2468,14 @@ func (a *App) handleRuleProviderAction(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	if r.Method == http.MethodPost && strings.HasSuffix(r.URL.Path, "/update") {
-		var item ruleProvider
-		if err := a.db.QueryRow(`SELECT id,name,primary_url,COALESCE(backup_url,'') FROM rule_providers WHERE id=?`, id).Scan(&item.ID, &item.Name, &item.PrimaryURL, &item.BackupURL); err != nil {
+		if _, err := a.refreshRuleProvider(id); errors.Is(err, sql.ErrNoRows) {
 			writeError(w, http.StatusNotFound, "Rule provider not found")
 			return
-		}
-		body, err := a.fetchRuleProvider(item.PrimaryURL)
-		if err != nil && item.BackupURL != "" {
-			body, err = a.fetchRuleProvider(item.BackupURL)
-		}
-		now := time.Now().UTC().Format(time.RFC3339)
-		if err != nil {
-			_, _ = a.db.Exec(`UPDATE rule_providers SET last_update_at=?,last_error=? WHERE id=?`, now, err.Error(), id)
+		} else if err != nil {
 			writeError(w, http.StatusBadGateway, "Rule provider update failed: "+err.Error())
 			return
 		}
-		_, _ = a.db.Exec(`UPDATE rule_providers SET last_update_at=?,last_error='',content=? WHERE id=?`, now, string(body), id)
-		writeJSON(w, http.StatusOK, map[string]any{"ok": true, "updatedAt": now})
+		writeJSON(w, http.StatusOK, map[string]any{"ok": true})
 		return
 	}
 	if r.Method == http.MethodDelete {
@@ -2538,7 +2531,7 @@ func (a *App) handleRuleProviderAction(w http.ResponseWriter, r *http.Request) {
 			return
 		}
 		normalizeRuleProvider(&x)
-		_, err := a.db.Exec(`UPDATE rule_providers SET name=?,provider_type=?,behavior=?,provider_format=?,primary_url=?,backup_url=?,path=?,enabled=?,update_mode=?,interval_minutes=? WHERE id=?`, x.Name, x.Type, x.Behavior, x.Format, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled), x.UpdateMode, x.IntervalMinutes, id)
+		_, err := a.db.Exec(`UPDATE rule_providers SET name=?,provider_type=?,behavior=?,provider_format=?,primary_url=?,backup_url=?,path=?,enabled=?,update_mode=?,interval_minutes=?,content='',last_update_at=NULL,last_error='' WHERE id=?`, x.Name, x.Type, x.Behavior, x.Format, x.PrimaryURL, x.BackupURL, x.Path, boolInt(x.Enabled), x.UpdateMode, x.IntervalMinutes, id)
 		if err != nil {
 			writeError(w, http.StatusBadRequest, err.Error())
 			return
@@ -2550,7 +2543,10 @@ func (a *App) handleRuleProviderAction(w http.ResponseWriter, r *http.Request) {
 }
 
 func (a *App) fetchRuleProvider(source string) ([]byte, error) {
-	client := &http.Client{Timeout: 25 * time.Second}
+	client := a.ruleProviderClient
+	if client == nil {
+		client = &http.Client{Timeout: 25 * time.Second}
+	}
 	req, err := http.NewRequest(http.MethodGet, source, nil)
 	if err != nil {
 		return nil, err
@@ -2565,6 +2561,29 @@ func (a *App) fetchRuleProvider(source string) ([]byte, error) {
 		return nil, fmt.Errorf("upstream status %d", response.StatusCode)
 	}
 	return io.ReadAll(io.LimitReader(response.Body, 10<<20))
+}
+
+// refreshRuleProvider downloads and persists the same provider snapshot used by
+// rule search. Keeping this in one path prevents manual updates and on-demand
+// lookup from interpreting different provider versions.
+func (a *App) refreshRuleProvider(id int64) ([]byte, error) {
+	var primaryURL, backupURL string
+	if err := a.db.QueryRow(`SELECT primary_url,COALESCE(backup_url,'') FROM rule_providers WHERE id=?`, id).Scan(&primaryURL, &backupURL); err != nil {
+		return nil, err
+	}
+	body, err := a.fetchRuleProvider(primaryURL)
+	if err != nil && backupURL != "" {
+		body, err = a.fetchRuleProvider(backupURL)
+	}
+	now := time.Now().UTC().Format(time.RFC3339)
+	if err != nil {
+		_, _ = a.db.Exec(`UPDATE rule_providers SET last_update_at=?,last_error=? WHERE id=?`, now, err.Error(), id)
+		return nil, err
+	}
+	if _, err := a.db.Exec(`UPDATE rule_providers SET last_update_at=?,last_error='',content=? WHERE id=?`, now, string(body), id); err != nil {
+		return nil, err
+	}
+	return body, nil
 }
 
 func (a *App) handleGroups(w http.ResponseWriter, r *http.Request) {
